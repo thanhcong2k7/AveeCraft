@@ -1,5 +1,5 @@
 # AveeCraft
-
+![AveeCraft Logo](https://github.com/thanhcong2k7/AveeCraft/blob/main/src/main/resources/drawable/aveecraft.png?raw=true)
 **AveeCraft** is a cross-platform Java & OpenGL desktop audio visualizer editor, `.viz` template studio, and hardware-accelerated video exporter ported from Android **Avee Player** (`v1.2.101`).
 
 ## Features

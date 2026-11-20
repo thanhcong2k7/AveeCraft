@@ -25,17 +25,23 @@ import imgui.flag.ImGuiTreeNodeFlags;
 import imgui.flag.ImGuiWindowFlags;
 import imgui.type.ImBoolean;
 import imgui.type.ImInt;
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
+import javax.imageio.ImageIO;
 import org.lwjgl.PointerBuffer;
+import org.lwjgl.glfw.GLFW;
+import org.lwjgl.glfw.GLFWImage;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 import org.lwjgl.opengl.GL30;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.util.tinyfd.TinyFileDialogs;
 
 public class AveeEditorApp extends Application {
@@ -120,6 +126,7 @@ public class AveeEditorApp extends Application {
     @Override
     protected void preRun() {
         super.preRun();
+        applyWindowIcon();
         Context ctx = PlayerCore.s().getAppContext();
         audioEngine = new DesktopAudioEngine();
         rendererCore = new RendererCore(ctx, ctx.getResources(), audioEngine);
@@ -128,6 +135,36 @@ public class AveeEditorApp extends Application {
         rendererCore.onSurfaceChanged(null, previewW, previewH);
 
         loadBuiltInPreset(0);
+    }
+
+    private void applyWindowIcon() {
+        long win = GLFW.glfwGetCurrentContext();
+        if (win == 0L) return;
+        try (InputStream is = AveeEditorApp.class.getResourceAsStream("/drawable/aveecraft.png")) {
+            if (is == null) return;
+            BufferedImage img = ImageIO.read(is);
+            if (img == null) return;
+            int w = img.getWidth();
+            int h = img.getHeight();
+            int[] argb = img.getRGB(0, 0, w, h, null, 0, w);
+            ByteBuffer pixels = MemoryUtil.memAlloc(w * h * 4);
+            for (int px : argb) {
+                pixels.put((byte) ((px >> 16) & 0xFF));
+                pixels.put((byte) ((px >> 8) & 0xFF));
+                pixels.put((byte) (px & 0xFF));
+                pixels.put((byte) ((px >> 24) & 0xFF));
+            }
+            pixels.flip();
+            try (GLFWImage.Buffer icons = GLFWImage.malloc(1)) {
+                icons.position(0).width(w).height(h).pixels(pixels);
+                icons.position(0);
+                GLFW.glfwSetWindowIcon(win, icons);
+            } finally {
+                MemoryUtil.memFree(pixels);
+            }
+        } catch (Throwable t) {
+            tlog.w("Failed to set window icon: " + t.getMessage());
+        }
     }
 
     @Override

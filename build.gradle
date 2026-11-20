@@ -60,6 +60,71 @@ tasks.register('stagePackageInput', Sync) {
     into layout.buildDirectory.dir('package-input')
 }
 
+tasks.register('generateWindowsIcon') {
+    def srcPng = file('src/main/resources/drawable/aveecraft.png')
+    def outIco = layout.buildDirectory.file('icon/aveecraft.ico')
+    inputs.file(srcPng)
+    outputs.file(outIco)
+    doLast {
+        def img = javax.imageio.ImageIO.read(srcPng)
+        int[] sizes = [16, 32, 48, 64, 128, 256] as int[]
+        def blobs = []
+        for (int s : sizes) {
+            def scaled = new java.awt.image.BufferedImage(s, s, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            def g = scaled.createGraphics()
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+            g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING, java.awt.RenderingHints.VALUE_RENDER_QUALITY)
+            g.drawImage(img, 0, 0, s, s, null)
+            g.dispose()
+            int andStride = ((s + 31).intdiv(32)) * 4
+            int dataLen = 40 + s * s * 4 + andStride * s
+            def bb = java.nio.ByteBuffer.allocate(dataLen).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            bb.putInt(40)       // biSize
+            bb.putInt(s)        // biWidth
+            bb.putInt(s * 2)    // biHeight (XOR + AND)
+            bb.putShort((short) 1)
+            bb.putShort((short) 32)
+            bb.putInt(0)        // BI_RGB
+            bb.putInt(s * s * 4 + andStride * s)
+            bb.putInt(0); bb.putInt(0); bb.putInt(0); bb.putInt(0)
+            for (int y = s - 1; y >= 0; y--) {
+                for (int x = 0; x < s; x++) {
+                    int argb = scaled.getRGB(x, y)
+                    bb.put((byte) (argb & 0xFF))
+                    bb.put((byte) ((argb >> 8) & 0xFF))
+                    bb.put((byte) ((argb >> 16) & 0xFF))
+                    bb.put((byte) ((argb >> 24) & 0xFF))
+                }
+            }
+            for (int i = 0; i < andStride * s; i++) bb.put((byte) 0)
+            blobs << [size: s, data: bb.array()]
+        }
+        def icoFile = outIco.get().asFile
+        icoFile.parentFile.mkdirs()
+        def hdr = java.nio.ByteBuffer.allocate(6 + 16 * blobs.size()).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        hdr.putShort((short) 0)
+        hdr.putShort((short) 1)
+        hdr.putShort((short) blobs.size())
+        int offset = hdr.capacity()
+        for (def b : blobs) {
+            byte dim = (b.size >= 256) ? (byte) 0 : (byte) b.size
+            hdr.put(dim)
+            hdr.put(dim)
+            hdr.put((byte) 0)
+            hdr.put((byte) 0)
+            hdr.putShort((short) 1)
+            hdr.putShort((short) 32)
+            hdr.putInt(b.data.length)
+            hdr.putInt(offset)
+            offset += b.data.length
+        }
+        icoFile.withOutputStream { os ->
+            os.write(hdr.array())
+            for (def b : blobs) os.write(b.data)
+        }
+    }
+}
+
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }

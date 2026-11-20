@@ -56,14 +56,20 @@ jobs:
       - name: Stage dependencies and build Standalone binary via jpackage
         shell: bash
         run: |
-          ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} stagePackageInput
+          ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} stagePackageInput generateWindowsIcon
           mkdir -p build/jpackage
+          if [ "${{ matrix.target_os }}" = "windows" ]; then
+            ICON_PATH="build/icon/aveecraft.ico"
+          else
+            ICON_PATH="src/main/resources/drawable/aveecraft.png"
+          fi
           jpackage \
             --type app-image \
             --name AveeCraft \
             --app-version "1.0.0" \
             --vendor "AveeCraft" \
             --description "AveeCraft — Desktop Audio Visualizer Editor & GPU Video Exporter" \
+            --icon "${ICON_PATH}" \
             --input build/package-input \
             --main-jar "AveeCraft-1.0.0.jar" \
             --main-class com.daaw.avee.editor.AveeEditorApp \
