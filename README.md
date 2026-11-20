@@ -1,6 +1,6 @@
 # AveeCraft
 ![AveeCraft Logo](https://github.com/thanhcong2k7/AveeCraft/blob/main/src/main/resources/drawable/aveecraft.png?raw=true)
-**AveeCraft** is a cross-platform Java & OpenGL desktop audio visualizer editor, `.viz` template studio, and hardware-accelerated video exporter ported from Android **Avee Player** (`v1.2.101`).
+**AveeCraft** is a self-contained, cross-platform Java & OpenGL desktop audio visualizer editor, `.viz` template studio, and hardware-accelerated video exporter ported from Android **Avee Player** (`v1.2.101`).
 
 ## Features
 
@@ -12,30 +12,28 @@
   - **Fast Async PBO Pipeline**: Offscreen FBO rendering + GPU-side Y-flip (`glBlitFramebuffer`) + double-buffered async Pixel Buffer Object (`GL_PIXEL_PACK_BUFFER`) DMA readback streamed directly to `ffmpeg`.
   - **Export Settings**: Presets (`1080p @60`, `1080p @30`, `720p @60`, `720p @30`, `1080x1920 Vertical`, `2160p 4K @60`, `Custom`), H.264 / HEVC codecs & profiles, bitrate, HQ blur toggle, hide app logo toggle, stereo AAC audio & start/end time range, 5s quick preview export, and live FPS/ETA progress monitor.
 
-## Download & Run Prebuilt Binaries
+## Download & Run Standalone Binaries
 
-GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds both **Standalone** (no Java required) and **Java-required** packages for Windows (`x64`) and Linux (`x64`):
+GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) produces fully **standalone** portable archives and native installers for Windows (`x64`) and Linux (`x64`) with **OpenJDK 21 runtime and FFmpeg/FFprobe bundled** — no separate Java or FFmpeg installation is required:
 
-| Package | Platform | Java Required? | Archive | Launch Command |
-|---|---|---|---|---|
-| **Windows Standalone** | Windows 10/11 x64 | **No** (bundled JRE 21) | `AveeCraft-windows-x64-standalone.zip` | Extract and run `AveeCraft.exe` |
-| **Linux Standalone** | Linux x64 | **No** (bundled JRE 21) | `AveeCraft-linux-x64-standalone.tar.gz` | Extract and run `./bin/AveeCraft` |
-| **Windows (Java Required)** | Windows 10/11 x64 | **Yes** (Java 21+) | `AveeCraft-windows-x64-java-required.zip` | Extract and run `bin\AveeCraft.bat` |
-| **Linux (Java Required)** | Linux x64 | **Yes** (Java 21+) | `AveeCraft-linux-x64-java-required.tar.gz` | Extract and run `./bin/AveeCraft` |
+| Platform | Type | Artifact | Launch / Install |
+|---|---|---|---|
+| **Windows 10/11 (x64)** | Setup Installer | `AveeCraft-windows-x64-setup.exe` | Run installer wizard (Start Menu & optional Desktop shortcut) |
+| **Windows 10/11 (x64)** | Portable Archive | `AveeCraft-windows-x64-standalone.zip` | Extract and run `AveeCraft.exe` |
+| **Linux (Debian / Ubuntu)** | `.deb` Package | `AveeCraft-linux-amd64.deb` | `sudo apt install ./AveeCraft-linux-amd64.deb` |
+| **Linux (Universal x64)** | Portable Archive | `AveeCraft-linux-x64-standalone.tar.gz` | Extract and run `./bin/AveeCraft` |
 
-### Runtime Prerequisites
+### Optional GPU Drivers (for Hardware Export)
 
-- **`ffmpeg` and `ffprobe` on `PATH`**: Required to decode MP3/AAC/OGG/FLAC audio files, decode video layers, and export `.mp4` videos. (WAV audio playback and synthetic beat mode run without FFmpeg.)
-- **GPU Drivers (optional, for hardware-accelerated export)**:
-  - **NVIDIA**: Recent NVIDIA proprietary driver for `h264_nvenc` / `hevc_nvenc` (on Linux PRIME laptops, **External GPU** sets `__NV_PRIME_RENDER_OFFLOAD=1` and `__GLX_VENDOR_LIBRARY_NAME=nvidia` automatically).
-  - **Intel / AMD Integrated**: Mesa + VA-API (`libva` / `intel-media-driver`) on Linux (`h264_vaapi` / `hevc_vaapi`), or Intel QuickSync / AMD AMF drivers on Windows.
+- **NVIDIA**: Recent NVIDIA proprietary driver for `h264_nvenc` / `hevc_nvenc` (on Linux PRIME laptops, **External GPU** sets `__NV_PRIME_RENDER_OFFLOAD=1` and `__GLX_VENDOR_LIBRARY_NAME=nvidia` automatically).
+- **Intel / AMD Integrated**: Mesa + VA-API (`libva` / `intel-media-driver`) on Linux (`h264_vaapi` / `hevc_vaapi`), or Intel QuickSync / AMD AMF drivers on Windows.
 
 ## Build & Verify from Source
 
 ### Prerequisites
 
 - **JDK 21** (Eclipse Temurin or equivalent OpenJDK 21 with `jpackage`)
-- **FFmpeg** on `PATH` (for running the verification suite and video export)
+- **FFmpeg / FFprobe** on `PATH` (for running from source or `./gradlew verifyEditor`)
 
 ### Run & Test
 
@@ -49,18 +47,20 @@ gradlew.bat run          # Windows
 gradlew.bat verifyEditor # Windows
 ```
 
-### Build Local Distribution & Standalone Packages
+### Build Local Standalone Package
+
+Place `ffmpeg` + `ffprobe` (or `ffmpeg.exe` + `ffprobe.exe` on Windows) into `build/package-input/ffmpeg/` after `stagePackageInput` to bundle them into the standalone binary:
 
 ```bash
-# 1. Installed-Java distribution -> build/install/AveeCraft/
-./gradlew installDist
+./gradlew stagePackageInput generateWindowsIcon
 
-# 2. Standalone app-image (no Java required to run) -> build/jpackage/AveeCraft/
-./gradlew stagePackageInput
+# Optional: copy ffmpeg & ffprobe binaries into build/package-input/ffmpeg/
+# then bundle with jpackage (Linux example):
 jpackage \
   --type app-image \
   --name AveeCraft \
   --app-version 1.0.0 \
+  --icon src/main/resources/drawable/aveecraft.png \
   --input build/package-input \
   --main-jar AveeCraft-1.0.0.jar \
   --main-class com.daaw.avee.editor.AveeEditorApp \
@@ -79,7 +79,8 @@ AveeCraft is built on top of and inspired by the following open-source projects,
 - **[Dear ImGui](https://github.com/ocornut/imgui)** by Omar Cornut — Immediate-mode graphical user interface library powering the desktop editor workspace.
 - **[imgui-java](https://github.com/SpaiR/imgui-java) (`1.87.7`)** by SpaiR — Java JNI bindings and LWJGL3 backend for Dear ImGui.
 - **[JSON-java (`org.json`)](https://github.com/stleary/JSON-java) (`20240303`)** — JSON serialization/deserialization for presets and `scene.json`.
-- **[FFmpeg / FFprobe](https://ffmpeg.org/)** — Audio decoding, video-frame decoding, hardware-accelerated video encoding (`NVENC`, `VA-API`, `QuickSync`, `AMF`), software `libx264` / `libx265` / `AAC` encoding, and MP4 muxing.
-- **[Eclipse Temurin OpenJDK 21](https://adoptium.net/) & `jpackage`** — Java 21 runtime, toolchain, and standalone native app-image bundler.
+- **[FFmpeg / FFprobe](https://ffmpeg.org/) & [BtbN FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)** — Static prebuilt FFmpeg/FFprobe binaries bundled inside the standalone distributions for audio decoding, video-frame decoding, hardware-accelerated video encoding (`NVENC`, `VA-API`, `QuickSync`, `AMF`), software `libx264` / `libx265` / `AAC` encoding, and MP4 muxing.
+- **[Eclipse Temurin OpenJDK 21](https://adoptium.net/) & `jpackage`** — Java 21 runtime, toolchain, Linux `.deb` packager, and standalone app-image bundler.
+- **[Inno Setup](https://jrsoftware.org/isinfo.php)** — Windows installer (`AveeCraft-windows-x64-setup.exe`) packager.
 - **[Gradle](https://gradle.org/) (`9.7.1`)** — Cross-platform build automation and wrapper.
 - **Bundled Fonts & Media**: `Noto Mono`, `Orbitron`, `Orkney`, `Great Vibes` (bundled in `src/main/resources/fonts/`), plus OS system fonts (`Noto Sans`, `DejaVu Sans`, `Segoe UI`, `Arial`) used for Unicode UI glyph rendering and text album art, and the bundled test audio sample (`src/main/resources/samples/music.mp3`).

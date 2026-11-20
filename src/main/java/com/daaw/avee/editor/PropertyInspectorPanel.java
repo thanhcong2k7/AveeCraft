@@ -532,7 +532,7 @@ public class PropertyInspectorPanel {
     private static Bitmap extractVideoThumb(File f) {
         try {
             Process p = new ProcessBuilder(
-                    "ffmpeg", "-v", "error", "-ss", "0.1", "-i", f.getAbsolutePath(),
+                    FfmpegLocator.ffmpeg(), "-v", "error", "-ss", "0.1", "-i", f.getAbsolutePath(),
                     "-frames:v", "1", "-vf", "scale=256:-2", "-f", "image2pipe", "-vcodec", "png", "pipe:1")
                     .start();
             byte[] png = p.getInputStream().readAllBytes();

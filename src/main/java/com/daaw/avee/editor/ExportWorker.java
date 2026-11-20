@@ -291,7 +291,7 @@ public class ExportWorker {
                                                File audioFile, GpuBackend.GpuPreference effGpu, boolean hevc,
                                                String encName, GpuBackend.ProbeResult probe, File outFile) {
         List<String> cmd = new ArrayList<>();
-        cmd.add("ffmpeg");
+        cmd.add(FfmpegLocator.ffmpeg());
         cmd.add("-y");
         cmd.add("-v");
         cmd.add("warning");

@@ -47,7 +47,7 @@ public class GpuBackend {
         boolean isWin = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
         try {
             // 1. Check encoders from ffmpeg
-            Process encProc = new ProcessBuilder("ffmpeg", "-hide_banner", "-encoders")
+            Process encProc = new ProcessBuilder(FfmpegLocator.ffmpeg(), "-hide_banner", "-encoders")
                     .redirectErrorStream(true).start();
             String encText;
             try (BufferedReader br = new BufferedReader(new InputStreamReader(encProc.getInputStream(), StandardCharsets.UTF_8))) {
@@ -149,7 +149,7 @@ public class GpuBackend {
     private static boolean testEncoder(String... args) {
         try {
             List<String> cmd = new ArrayList<>();
-            cmd.add("ffmpeg");
+            cmd.add(FfmpegLocator.ffmpeg());
             cmd.add("-v");
             cmd.add("error");
             for (String a : args) cmd.add(a);

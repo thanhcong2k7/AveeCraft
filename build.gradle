@@ -58,6 +58,9 @@ tasks.register('stagePackageInput', Sync) {
     from tasks.named('jar')
     from configurations.runtimeClasspath
     into layout.buildDirectory.dir('package-input')
+    preserve {
+        include 'ffmpeg/**'
+    }
 }
 
 tasks.register('generateWindowsIcon') {

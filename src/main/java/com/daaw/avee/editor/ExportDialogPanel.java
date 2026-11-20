@@ -310,15 +310,26 @@ public class ExportDialogPanel {
         String binDir = System.getProperty("java.home") + File.separator + "bin" + File.separator;
         File winJavaw = new File(binDir + "javaw.exe");
         File winJava = new File(binDir + "java.exe");
-        String javaBin = winJavaw.isFile() ? winJavaw.getAbsolutePath()
-                : (winJava.isFile() ? winJava.getAbsolutePath() : (binDir + "java"));
-        String cp = System.getProperty("java.class.path");
+        File unixJava = new File(binDir + "java");
+        File javaExe = winJavaw.isFile() ? winJavaw : (winJava.isFile() ? winJava : (unixJava.isFile() ? unixJava : null));
+
         List<String> cmd = new ArrayList<>();
-        cmd.add(javaBin);
-        cmd.add("-cp");
-        cmd.add(cp);
-        cmd.add("com.daaw.avee.editor.ExportWorker");
-        cmd.add(cfgFile.getAbsolutePath());
+        if (javaExe != null) {
+            cmd.add(javaExe.getAbsolutePath());
+            cmd.add("-cp");
+            cmd.add(System.getProperty("java.class.path"));
+            cmd.add("com.daaw.avee.editor.ExportWorker");
+            cmd.add(cfgFile.getAbsolutePath());
+        } else {
+            // Standalone jpackage runtime omits runtime/bin/java; invoke our native launcher with --export
+            String selfCmd = ProcessHandle.current().info().command().orElse(null);
+            if (selfCmd == null || !new File(selfCmd).isFile()) {
+                throw new IllegalStateException("Neither java executable nor standalone AveeCraft launcher found");
+            }
+            cmd.add(selfCmd);
+            cmd.add("--export");
+            cmd.add(cfgFile.getAbsolutePath());
+        }
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);

@@ -789,7 +789,11 @@ public class AveeEditorApp extends Application {
         return new File(f.getParentFile(), f.getName() + ext);
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
+        if (args != null && args.length >= 2 && "--export".equals(args[0])) {
+            ExportWorker.main(new String[]{args[1]});
+            return;
+        }
         tlog.d("Starting AveeCraft...");
         if (Integer.getInteger("avee.smokeFrames", 0) > 0) {
             final Thread mainT = Thread.currentThread();

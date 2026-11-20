@@ -6,6 +6,7 @@ import com.daaw.avee.comp.AlbumArt.AlbumArtCore;
 import com.daaw.avee.comp.Visualizer.Graphic.RenderState;
 import com.daaw.avee.comp.Visualizer.Graphic.VFrameBuffer;
 import com.daaw.avee.comp.Visualizer.Graphic.VTexture;
+import com.daaw.avee.editor.FfmpegLocator;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
@@ -55,7 +56,7 @@ public class VideoFrameDecoder {
         }
         try {
             ProcessBuilder pb = new ProcessBuilder(
-                    "ffprobe", "-v", "error", "-select_streams", "v:0",
+                    FfmpegLocator.ffprobe(), "-v", "error", "-select_streams", "v:0",
                     "-show_entries", "stream=width,height,duration",
                     "-show_entries", "format=duration",
                     "-of", "default=noprint_wrappers=1:nokey=1",
@@ -137,7 +138,7 @@ public class VideoFrameDecoder {
         try {
             double sec = timeUs / 1_000_000.0;
             ProcessBuilder pb = new ProcessBuilder(
-                    "ffmpeg", "-v", "error",
+                    FfmpegLocator.ffmpeg(), "-v", "error",
                     "-ss", String.format(Locale.US, "%.3f", sec),
                     "-i", sourceFile.getAbsolutePath(),
                     "-frames:v", "1",

@@ -188,7 +188,7 @@ public class EditorVerifier {
 
         File tmpMp4 = File.createTempFile("avee_test_vid_", ".mp4");
         tmpMp4.deleteOnExit();
-        Process ff = new ProcessBuilder("ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=0.5:size=160x120:rate=15",
+        Process ff = new ProcessBuilder(FfmpegLocator.ffmpeg(), "-y", "-f", "lavfi", "-i", "testsrc=duration=0.5:size=160x120:rate=15",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", tmpMp4.getAbsolutePath())
                 .redirectErrorStream(true).start();
         ff.getInputStream().readAllBytes();
@@ -334,7 +334,7 @@ public class EditorVerifier {
         // Also generate a distinct multi-frame color-changing .gif and verify file-based .gif playback
         File tmpGif = File.createTempFile("avee_test_anim_", ".gif");
         tmpGif.deleteOnExit();
-        Process ffGif = new ProcessBuilder("ffmpeg", "-y", "-f", "lavfi", "-i",
+        Process ffGif = new ProcessBuilder(FfmpegLocator.ffmpeg(), "-y", "-f", "lavfi", "-i",
                 "testsrc=duration=1.0:size=128x96:rate=10", tmpGif.getAbsolutePath())
                 .redirectErrorStream(true).start();
         ffGif.getInputStream().readAllBytes();
@@ -442,7 +442,7 @@ public class EditorVerifier {
             if (wRc != 0 || !expOut.exists() || expOut.length() < 4096) {
                 throw new AssertionError("Export failed for " + pref + " rc=" + wRc + " size=" + expOut.length() + "\n" + workerLog);
             }
-            Process fp = new ProcessBuilder("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height",
+            Process fp = new ProcessBuilder(FfmpegLocator.ffprobe(), "-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height",
                     "-of", "csv=p=0", expOut.getAbsolutePath()).redirectErrorStream(true).start();
             String fpOut = new String(fp.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim();
             fp.waitFor();

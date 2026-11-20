@@ -1,4 +1,4 @@
-name: Build AveeCraft Desktop Binaries (Windows & Linux)
+name: Build AveeCraft Portable & Installer Binaries (Windows & Linux)
 
 on:
   push:
@@ -50,13 +50,30 @@ jobs:
         if: runner.os != 'Windows'
         run: chmod +x gradlew
 
-      - name: Compile and build Java-required distribution
-        run: ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} compileJava installDist
+      - name: Compile and stage dependencies
+        run: ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} compileJava stagePackageInput generateWindowsIcon
 
-      - name: Stage dependencies and build Standalone binary via jpackage
+      - name: Download & bundle FFmpeg & FFprobe
         shell: bash
         run: |
-          ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} stagePackageInput generateWindowsIcon
+          mkdir -p build/package-input/ffmpeg build/tmp-ffmpeg
+          if [ "${{ matrix.target_os }}" = "windows" ]; then
+            curl -fL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -o build/tmp-ffmpeg/ffmpeg.zip
+            7z e build/tmp-ffmpeg/ffmpeg.zip "*/bin/ffmpeg.exe" "*/bin/ffprobe.exe" -obuild/package-input/ffmpeg -y
+          else
+            curl -fL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" -o build/tmp-ffmpeg/ffmpeg.tar.xz
+            tar -xJf build/tmp-ffmpeg/ffmpeg.tar.xz -C build/tmp-ffmpeg
+            cp build/tmp-ffmpeg/ffmpeg-*/bin/ffmpeg build/package-input/ffmpeg/ffmpeg
+            cp build/tmp-ffmpeg/ffmpeg-*/bin/ffprobe build/package-input/ffmpeg/ffprobe
+            chmod +x build/package-input/ffmpeg/ffmpeg build/package-input/ffmpeg/ffprobe
+          fi
+          rm -rf build/tmp-ffmpeg
+          ls -lh build/package-input/ffmpeg
+
+      - name: Build Standalone app-image via jpackage
+        shell: bash
+        run: |
+          rm -rf build/jpackage
           mkdir -p build/jpackage
           if [ "${{ matrix.target_os }}" = "windows" ]; then
             ICON_PATH="build/icon/aveecraft.ico"
@@ -78,40 +95,79 @@ jobs:
             --java-options "-Xmx2048m" \
             --dest build/jpackage
 
-      - name: Package Standalone & Java-required binaries
+      - name: Package Portable Standalone archive
         shell: bash
         run: |
           mkdir -p build/release
           rm -rf build/staging
           mkdir -p build/staging
 
-          # 1. Standalone (bundled JDK 21 runtime, no Java installation required)
           cp -r build/jpackage/AveeCraft "build/staging/AveeCraft-${{ matrix.os_label }}-standalone"
           if [ "${{ matrix.target_os }}" = "windows" ]; then
             (cd build/staging && 7z a -tzip "../release/AveeCraft-${{ matrix.os_label }}-standalone.zip" "AveeCraft-${{ matrix.os_label }}-standalone")
           else
             chmod +x "build/staging/AveeCraft-${{ matrix.os_label }}-standalone/bin/AveeCraft"
+            chmod +x "build/staging/AveeCraft-${{ matrix.os_label }}-standalone/lib/app/ffmpeg/ffmpeg" \
+                     "build/staging/AveeCraft-${{ matrix.os_label }}-standalone/lib/app/ffmpeg/ffprobe"
             tar -czf "build/release/AveeCraft-${{ matrix.os_label }}-standalone.tar.gz" -C build/staging "AveeCraft-${{ matrix.os_label }}-standalone"
           fi
 
-          # 2. Java-required (smaller archive, requires Java 21+ on target machine)
-          cp -r build/install/AveeCraft "build/staging/AveeCraft-${{ matrix.os_label }}-java-required"
-          if [ "${{ matrix.target_os }}" = "windows" ]; then
-            (cd build/staging && 7z a -tzip "../release/AveeCraft-${{ matrix.os_label }}-java-required.zip" "AveeCraft-${{ matrix.os_label }}-java-required")
-          else
-            chmod +x "build/staging/AveeCraft-${{ matrix.os_label }}-java-required/bin/AveeCraft"
-            tar -czf "build/release/AveeCraft-${{ matrix.os_label }}-java-required.tar.gz" -C build/staging "AveeCraft-${{ matrix.os_label }}-java-required"
+      - name: Build Linux .deb installer
+        if: matrix.target_os == 'linux'
+        shell: bash
+        run: |
+          if ! command -v fakeroot >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y fakeroot
           fi
+          rm -rf build/installer && mkdir -p build/installer build/release
+          jpackage \
+            --type deb \
+            --app-image build/jpackage/AveeCraft \
+            --name AveeCraft \
+            --app-version "1.0.0" \
+            --vendor "AveeCraft" \
+            --description "AveeCraft — Desktop Audio Visualizer Editor & GPU Video Exporter" \
+            --icon "src/main/resources/drawable/aveecraft.png" \
+            --linux-shortcut \
+            --linux-menu-group "AudioVideo" \
+            --dest build/installer
+          mv build/installer/*.deb "build/release/AveeCraft-linux-amd64.deb"
 
-          ls -lh build/release
+      - name: Build Windows Setup (.exe) via Inno Setup
+        if: matrix.target_os == 'windows'
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install -y innosetup
+          }
+          if (-not (Test-Path $iscc)) {
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source }
+          }
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup ISCC.exe not found"
+          }
+          New-Item -ItemType Directory -Force -Path build\release | Out-Null
+          $srcDir = (Resolve-Path build\jpackage\AveeCraft).Path
+          $iconPath = (Resolve-Path build\icon\aveecraft.ico).Path
+          $outDir = (Resolve-Path build\release).Path
+          & $iscc "/DAppVersion=1.0.0" "/DAppSourceDir=$srcDir" "/DAppIcon=$iconPath" "/DOutputDir=$outDir" "installer\windows\AveeCraft.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload build artifacts
+      - name: List & upload release artifacts
+        shell: bash
+        run: ls -lh build/release
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: AveeCraft-${{ matrix.os_label }}
           path: |
             build/release/*.zip
             build/release/*.tar.gz
+            build/release/*.exe
+            build/release/*.deb
 
   release:
     name: Publish GitHub Release

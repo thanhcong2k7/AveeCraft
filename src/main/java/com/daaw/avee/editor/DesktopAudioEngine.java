@@ -75,7 +75,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
         if (file == null || !file.exists()) return false;
         try {
             ProcessBuilder pb = new ProcessBuilder(
-                    "ffmpeg", "-v", "error", "-i", file.getAbsolutePath(),
+                    FfmpegLocator.ffmpeg(), "-v", "error", "-i", file.getAbsolutePath(),
                     "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "2", "-ar", String.valueOf(SAMPLE_RATE),
                     "pipe:1");
             Process proc = pb.start();
@@ -408,7 +408,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             File tmp = File.createTempFile("avee_albumart_", ".png");
             tmp.deleteOnExit();
             Process p = new ProcessBuilder(
-                    "ffmpeg", "-y", "-v", "error", "-i", songFile.getAbsolutePath(),
+                    FfmpegLocator.ffmpeg(), "-y", "-v", "error", "-i", songFile.getAbsolutePath(),
                     "-an", "-vframes", "1", "-f", "image2", "-vcodec", "png",
                     tmp.getAbsolutePath())
                     .redirectError(ProcessBuilder.Redirect.DISCARD)

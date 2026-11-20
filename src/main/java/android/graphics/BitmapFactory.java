@@ -65,7 +65,7 @@ public class BitmapFactory {
     private static BufferedImage decodeViaFfmpeg(File f) {
         try {
             Process p = new ProcessBuilder(
-                    "ffmpeg", "-v", "error", "-i", f.getAbsolutePath(),
+                    com.daaw.avee.editor.FfmpegLocator.ffmpeg(), "-v", "error", "-i", f.getAbsolutePath(),
                     "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1")
                     .start();
             byte[] png = p.getInputStream().readAllBytes();
