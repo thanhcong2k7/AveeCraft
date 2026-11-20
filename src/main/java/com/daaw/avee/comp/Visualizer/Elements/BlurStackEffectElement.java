@@ -371,24 +371,15 @@ public class BlurStackEffectElement extends Element {
             if (compositionResult == null) {
                 return;
             }
-            if (this.radius > 0.0f) {
-                VFrameBuffer[] vFrameBufferArr2 = this.blurTargets;
-                if (vFrameBufferArr2.length > 0) {
-                    stackBlur(renderState, vFrameBufferArr2[0], compositionResult.getTexture());
-                    int i = 1;
-                    while (true) {
-                        vFrameBufferArr = this.blurTargets;
-                        if (i >= vFrameBufferArr.length) {
-                            break;
-                        }
-                        stackBlur(renderState, vFrameBufferArr[i], vFrameBufferArr[i - 1].getTexture());
-                        i++;
-                    }
-                    texture = vFrameBufferArr[vFrameBufferArr.length - 1].getTexture();
-                    this.blurContentPreRendered = texture;
+            if (this.radius > 0.0f && this.blurTargets.length > 0) {
+                stackBlur(renderState, this.blurTargets[0], compositionResult.getTexture());
+                for (int i = 1; i < this.blurTargets.length; i++) {
+                    stackBlur(renderState, this.blurTargets[i], this.blurTargets[i - 1].getTexture());
                 }
+                texture = this.blurTargets[this.blurTargets.length - 1].getTexture();
+            } else {
+                texture = compositionResult.getTexture();
             }
-            texture = compositionResult.getTexture();
             this.blurContentPreRendered = texture;
         }
     }

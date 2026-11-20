@@ -3,7 +3,6 @@ package com.daaw.avee.Design;
 import com.daaw.avee.Common.Utils;
 import com.daaw.avee.Common.Vec2f;
 import java.util.ArrayList;
-import junit.framework.Assert;
 /* loaded from: classes.dex */
 public class HandheldMotion {
     float[] posX;
@@ -31,8 +30,9 @@ public class HandheldMotion {
         this.posX = parse(preset.posX, true);
         this.posY = parse(preset.posY, true);
         this.rot = parse(preset.rot, false);
-        Assert.assertEquals(this.posX.length, this.posY.length);
-        Assert.assertEquals(this.posX.length, this.rot.length);
+        if (this.posX.length != this.posY.length || this.posX.length != this.rot.length) {
+            throw new IllegalStateException("HandheldMotion array length mismatch");
+        }
     }
 
     float[] parse(String str, boolean z) {

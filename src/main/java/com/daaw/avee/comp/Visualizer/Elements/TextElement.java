@@ -150,26 +150,36 @@ public class TextElement extends Element {
     public boolean onCreateGLResources(RenderState renderState) {
         int min = Math.min((int) renderState.getRes().getMeter().measureScreenSpace(this.fontSize * 0.14f * 0.01f), this.maxfontSizePixelsLimit);
         Typeface typeface = Typeface.DEFAULT;
-        if ("".equals(this.customFontPath)) {
+        String fontKey = this.customFontPath != null ? this.customFontPath : "";
+        if (fontKey.startsWith("internal_")) {
+            int colon = fontKey.indexOf(':');
+            if (colon > 0) {
+                fontKey = fontKey.substring(0, colon);
+            }
+        }
+        if ("".equals(fontKey)) {
             typeface = Typeface.DEFAULT;
-        } else if ("default_bold".equals(this.customFontPath)) {
+        } else if ("default_bold".equals(fontKey)) {
             typeface = Typeface.DEFAULT_BOLD;
         } else {
             Context appContext = PlayerCore.s().getAppContext();
-            if (appContext != null) {
-                try {
-                    if ("internal_0".equals(this.customFontPath)) {
-                        typeface = Typeface.createFromAsset(appContext.getAssets(), "fonts/greatvibes-regular.otf");
-                    } else if ("internal_1".equals(this.customFontPath)) {
-                        typeface = Typeface.createFromAsset(appContext.getAssets(), "fonts/notomono-regular.ttf");
-                    } else if ("internal_2".equals(this.customFontPath)) {
-                        typeface = Typeface.createFromAsset(appContext.getAssets(), "fonts/orbitron-medium.otf");
-                    } else if ("internal_3".equals(this.customFontPath)) {
-                        typeface = Typeface.createFromAsset(appContext.getAssets(), "fonts/orkney-light.otf");
+            try {
+                if ("internal_0".equals(fontKey) && appContext != null) {
+                    typeface = Typeface.createFromAsset(appContext.getAssets(), "fonts/greatvibes-regular.otf");
+                } else if ("internal_1".equals(fontKey) && appContext != null) {
+                    typeface = Typeface.createFromAsset(appContext.getAssets(), "fonts/notomono-regular.ttf");
+                } else if ("internal_2".equals(fontKey) && appContext != null) {
+                    typeface = Typeface.createFromAsset(appContext.getAssets(), "fonts/orbitron-medium.otf");
+                } else if ("internal_3".equals(fontKey) && appContext != null) {
+                    typeface = Typeface.createFromAsset(appContext.getAssets(), "fonts/orkney-light.otf");
+                } else {
+                    java.io.File fontFile = com.daaw.avee.comp.AlbumArt.AlbumArtCore.resolveLocalOrFile(fontKey);
+                    if (fontFile != null && fontFile.isFile()) {
+                        typeface = Typeface.createFromFile(fontFile);
                     }
-                } catch (Exception unused) {
-                    typeface = Typeface.DEFAULT;
                 }
+            } catch (Exception unused) {
+                typeface = Typeface.DEFAULT;
             }
         }
         SpriteFont spriteFont = this.font1;

@@ -100,25 +100,8 @@ public class SVGApproximate {
         return pathCreator.getSegments();
     }
 
-    /* JADX WARN: Code restructure failed: missing block: B:16:0x0044, code lost:
-        if ("lhvcsqta".indexOf(java.lang.Character.toLowerCase(r1)) >= 0) goto L10;
-     */
-    /* JADX WARN: Removed duplicated region for block: B:22:0x0057  */
-    /* JADX WARN: Removed duplicated region for block: B:24:0x0077  */
-    /* JADX WARN: Removed duplicated region for block: B:26:0x0086  */
-    /* JADX WARN: Removed duplicated region for block: B:30:0x0098  */
-    /* JADX WARN: Removed duplicated region for block: B:34:0x00da  */
-    /* JADX WARN: Removed duplicated region for block: B:38:0x00f2  */
-    /* JADX WARN: Removed duplicated region for block: B:43:0x010c  */
-    /* JADX WARN: Removed duplicated region for block: B:47:0x0120  */
-    /* JADX WARN: Removed duplicated region for block: B:51:0x015f  */
-    /* JADX WARN: Removed duplicated region for block: B:56:0x019f  */
-    /* JADX WARN: Removed duplicated region for block: B:61:0x01a3 A[SYNTHETIC] */
-    /*
-        Code decompiled incorrectly, please refer to instructions dump.
-    */
     private static IPath doPath(String str, IPath iPath) {
-        char c = 0;
+        char c;
         float nextFloat;
         float nextFloat2;
         boolean z;
@@ -133,228 +116,174 @@ public class SVGApproximate {
         float f5 = 0.0f;
         float f6 = 0.0f;
         while (parserHelper.pos < length) {
-            c = c2;
             char charAt = str.charAt(parserHelper.pos);
-            if (charAt != '+' && charAt != '-' && charAt != '.') {
-                switch (charAt) {
-                    case '0':
-                    case '1':
-                    case '2':
-                    case '3':
-                    case '4':
-                    case '5':
-                    case '6':
-                    case '7':
-                    case '8':
-                    case '9':
-                        break;
-                    default:
-                        parserHelper.advance();
-                        c2 = charAt;
-                        c = c2;
-                        break;
+            if (charAt == '+' || charAt == '-' || charAt == '.' || (charAt >= '0' && charAt <= '9')) {
+                if (c2 == 'm' || c2 == 'M') {
+                    c = c2;
+                    c2 = (char) (c2 - 1);
+                } else if ("lhvcsqta".indexOf(Character.toLowerCase(c2)) >= 0) {
+                    c = c2;
+                } else {
+                    parserHelper.advance();
+                    c2 = charAt;
+                    c = c2;
                 }
+            } else {
+                parserHelper.advance();
+                c2 = charAt;
+                c = c2;
             }
+            z = true;
             switch (c2) {
-                    case 'A':
-                    case 'a':
-                        float nextFloat3 = parserHelper.nextFloat();
-                        float nextFloat4 = parserHelper.nextFloat();
-                        float nextFloat5 = parserHelper.nextFloat();
-                        int nextFlag = parserHelper.nextFlag();
-                        int nextFlag2 = parserHelper.nextFlag();
-                        float nextFloat6 = parserHelper.nextFloat();
-                        float nextFloat7 = parserHelper.nextFloat();
-                        if (c2 == 'a') {
-                            nextFloat6 += f;
-                            nextFloat7 += f2;
-                        }
-                        float f7 = nextFloat6;
-                        float f8 = nextFloat7;
-                        drawArc(iPath, f, f2, f7, f8, nextFloat3, nextFloat4, nextFloat5, nextFlag, nextFlag2);
-                        f = f7;
-                        f4 = f4;
-                        f2 = f8;
-                        f3 = f3;
-                        z = false;
-                        if (!z) {
-                            f5 = f;
-                            f6 = f2;
-                        }
-                        parserHelper.skipWhitespace();
-                        c2 = c;
-                        break;
-                    case 'C':
-                    case 'c':
-                        float nextFloat8 = parserHelper.nextFloat();
-                        float nextFloat9 = parserHelper.nextFloat();
-                        float nextFloat10 = parserHelper.nextFloat();
-                        float nextFloat11 = parserHelper.nextFloat();
-                        float nextFloat12 = parserHelper.nextFloat();
-                        float nextFloat13 = parserHelper.nextFloat();
-                        if (c2 == 'c') {
-                            nextFloat8 += f;
-                            nextFloat10 += f;
-                            nextFloat12 += f;
-                            nextFloat9 += f2;
-                            nextFloat11 += f2;
-                            nextFloat13 += f2;
-                        }
-                        float f9 = nextFloat10;
-                        float f10 = nextFloat11;
-                        iPath.cubicTo(nextFloat8, nextFloat9, f9, f10, nextFloat12, nextFloat13);
-                        f = nextFloat12;
-                        f2 = nextFloat13;
-                        f6 = f10;
-                        f5 = f9;
-                        z = true;
-                        if (!z) {
-                        }
-                        parserHelper.skipWhitespace();
-                        c2 = c;
-                        break;
-                    case 'H':
-                    case 'h':
-                        float nextFloat14 = parserHelper.nextFloat();
-                        if (c2 == 'h') {
-                            iPath.rLineTo(nextFloat14, 0.0f);
-                            f += nextFloat14;
-                        } else {
-                            iPath.lineTo(nextFloat14, f2);
-                            f = nextFloat14;
-                        }
-                        z = false;
-                        if (!z) {
-                        }
-                        parserHelper.skipWhitespace();
-                        c2 = c;
-                        break;
-                    case 'L':
-                    case 'T':
-                    case 'l':
-                    case 't':
-                        nextFloat = parserHelper.nextFloat();
-                        nextFloat2 = parserHelper.nextFloat();
-                        if (c2 == 'l') {
-                            iPath.rLineTo(nextFloat, nextFloat2);
-                            f += nextFloat;
-                            f2 += nextFloat2;
-                            z = false;
-                            if (!z) {
-                            }
-                            parserHelper.skipWhitespace();
-                            c2 = c;
-                        } else {
-                            iPath.lineTo(nextFloat, nextFloat2);
-                            f = nextFloat;
-                            f2 = nextFloat2;
-                            z = false;
-                            if (!z) {
-                            }
-                            parserHelper.skipWhitespace();
-                            c2 = c;
-                        }
-                        break;
-                    case 'M':
-                    case 'm':
-                        nextFloat = parserHelper.nextFloat();
-                        nextFloat2 = parserHelper.nextFloat();
-                        if (c2 == 'm') {
-                            f4 += nextFloat;
-                            f3 += nextFloat2;
-                            iPath.rMoveTo(nextFloat, nextFloat2);
-                            f += nextFloat;
-                            f2 += nextFloat2;
-                            z = false;
-                            if (!z) {
-                            }
-                            parserHelper.skipWhitespace();
-                            c2 = c;
-                        } else {
-                            iPath.moveTo(nextFloat, nextFloat2);
-                            f = nextFloat;
-                            f4 = f;
-                            f2 = nextFloat2;
-                            f3 = f2;
-                            z = false;
-                            if (!z) {
-                            }
-                            parserHelper.skipWhitespace();
-                            c2 = c;
-                        }
-                        break;
-                    case 'Q':
-                    case 'S':
-                    case 'q':
-                    case 's':
-                        float nextFloat15 = parserHelper.nextFloat();
-                        float nextFloat16 = parserHelper.nextFloat();
-                        float nextFloat17 = parserHelper.nextFloat();
-                        float nextFloat18 = parserHelper.nextFloat();
-                        if (Character.isLowerCase(c2)) {
-                            nextFloat15 += f;
-                            nextFloat17 += f;
-                            nextFloat16 += f2;
-                            nextFloat18 += f2;
-                        }
-                        float f11 = nextFloat15;
-                        float f12 = nextFloat16;
-                        float f13 = nextFloat17;
-                        float f14 = nextFloat18;
-                        iPath.cubicTo((f * 2.0f) - f5, (f2 * 2.0f) - f6, f11, f12, f13, f14);
-                        f5 = f11;
-                        f6 = f12;
-                        f = f13;
-                        f2 = f14;
-                        z = true;
-                        if (!z) {
-                        }
-                        parserHelper.skipWhitespace();
-                        c2 = c;
-                        break;
-                    case 'V':
-                    case 'v':
-                        float nextFloat19 = parserHelper.nextFloat();
-                        if (c2 == 'v') {
-                            iPath.rLineTo(0.0f, nextFloat19);
-                            f2 += nextFloat19;
-                        } else {
-                            iPath.lineTo(f, nextFloat19);
-                            f2 = nextFloat19;
-                        }
-                        z = false;
-                        if (!z) {
-                        }
-                        parserHelper.skipWhitespace();
-                        c2 = c;
-                        break;
-                    case 'Z':
-                    case 'z':
-                        iPath.close();
-                        iPath.moveTo(f4, f3);
-                        f2 = f3;
-                        f6 = f2;
-                        f = f4;
-                        f5 = f;
-                        z = true;
-                        if (!z) {
-                        }
-                        parserHelper.skipWhitespace();
-                        c2 = c;
-                        break;
-                    default:
-                        Log.w(TAG, "Invalid path command: " + c2);
-                        parserHelper.advance();
-                        z = false;
-                        if (!z) {
-                        }
-                        parserHelper.skipWhitespace();
-                        c2 = c;
-                        break;
-                }
-            if (c2 == 'm' || c2 == 'M') {
-                c2 = (char) (c2 - 1);
+                case 'A':
+                case 'a':
+                    float nextFloat3 = parserHelper.nextFloat();
+                    float nextFloat4 = parserHelper.nextFloat();
+                    float nextFloat5 = parserHelper.nextFloat();
+                    int nextFlag = parserHelper.nextFlag();
+                    int nextFlag2 = parserHelper.nextFlag();
+                    float nextFloat6 = parserHelper.nextFloat();
+                    float nextFloat7 = parserHelper.nextFloat();
+                    if (c2 == 'a') {
+                        nextFloat6 += f;
+                        nextFloat7 += f2;
+                    }
+                    float f7 = nextFloat6;
+                    float f8 = nextFloat7;
+                    drawArc(iPath, f, f2, f7, f8, nextFloat3, nextFloat4, nextFloat5, nextFlag, nextFlag2);
+                    f = f7;
+                    f2 = f8;
+                    z = false;
+                    break;
+                case 'C':
+                case 'c':
+                    float nextFloat8 = parserHelper.nextFloat();
+                    float nextFloat9 = parserHelper.nextFloat();
+                    float nextFloat10 = parserHelper.nextFloat();
+                    float nextFloat11 = parserHelper.nextFloat();
+                    float nextFloat12 = parserHelper.nextFloat();
+                    float nextFloat13 = parserHelper.nextFloat();
+                    if (c2 == 'c') {
+                        nextFloat8 += f;
+                        nextFloat10 += f;
+                        nextFloat12 += f;
+                        nextFloat9 += f2;
+                        nextFloat11 += f2;
+                        nextFloat13 += f2;
+                    }
+                    float f9 = nextFloat10;
+                    float f10 = nextFloat11;
+                    iPath.cubicTo(nextFloat8, nextFloat9, f9, f10, nextFloat12, nextFloat13);
+                    f = nextFloat12;
+                    f2 = nextFloat13;
+                    f6 = f10;
+                    f5 = f9;
+                    break;
+                case 'H':
+                case 'h':
+                    float nextFloat14 = parserHelper.nextFloat();
+                    if (c2 == 'h') {
+                        iPath.rLineTo(nextFloat14, 0.0f);
+                        f += nextFloat14;
+                    } else {
+                        iPath.lineTo(nextFloat14, f2);
+                        f = nextFloat14;
+                    }
+                    z = false;
+                    break;
+                case 'L':
+                case 'T':
+                case 'l':
+                case 't':
+                    nextFloat = parserHelper.nextFloat();
+                    nextFloat2 = parserHelper.nextFloat();
+                    if (c2 == 'l') {
+                        iPath.rLineTo(nextFloat, nextFloat2);
+                        f += nextFloat;
+                        f2 += nextFloat2;
+                    } else {
+                        iPath.lineTo(nextFloat, nextFloat2);
+                        f = nextFloat;
+                        f2 = nextFloat2;
+                    }
+                    z = false;
+                    break;
+                case 'M':
+                case 'm':
+                    nextFloat = parserHelper.nextFloat();
+                    nextFloat2 = parserHelper.nextFloat();
+                    if (c2 == 'm') {
+                        f4 += nextFloat;
+                        f3 += nextFloat2;
+                        iPath.rMoveTo(nextFloat, nextFloat2);
+                        f += nextFloat;
+                        f2 += nextFloat2;
+                    } else {
+                        iPath.moveTo(nextFloat, nextFloat2);
+                        f = nextFloat;
+                        f4 = f;
+                        f2 = nextFloat2;
+                        f3 = f2;
+                    }
+                    z = false;
+                    break;
+                case 'Q':
+                case 'S':
+                case 'q':
+                case 's':
+                    float nextFloat15 = parserHelper.nextFloat();
+                    float nextFloat16 = parserHelper.nextFloat();
+                    float nextFloat17 = parserHelper.nextFloat();
+                    float nextFloat18 = parserHelper.nextFloat();
+                    if (Character.isLowerCase(c2)) {
+                        nextFloat15 += f;
+                        nextFloat17 += f;
+                        nextFloat16 += f2;
+                        nextFloat18 += f2;
+                    }
+                    float f11 = nextFloat15;
+                    float f12 = nextFloat16;
+                    float f13 = nextFloat17;
+                    float f14 = nextFloat18;
+                    iPath.cubicTo((f * 2.0f) - f5, (f2 * 2.0f) - f6, f11, f12, f13, f14);
+                    f5 = f11;
+                    f6 = f12;
+                    f = f13;
+                    f2 = f14;
+                    break;
+                case 'V':
+                case 'v':
+                    float nextFloat19 = parserHelper.nextFloat();
+                    if (c2 == 'v') {
+                        iPath.rLineTo(0.0f, nextFloat19);
+                        f2 += nextFloat19;
+                    } else {
+                        iPath.lineTo(f, nextFloat19);
+                        f2 = nextFloat19;
+                    }
+                    z = false;
+                    break;
+                case 'Z':
+                case 'z':
+                    iPath.close();
+                    iPath.moveTo(f4, f3);
+                    f2 = f3;
+                    f6 = f2;
+                    f = f4;
+                    f5 = f;
+                    break;
+                default:
+                    Log.w(TAG, "Invalid path command: " + c2);
+                    parserHelper.advance();
+                    z = false;
+                    break;
             }
+            if (!z) {
+                f5 = f;
+                f6 = f2;
+            }
+            parserHelper.skipWhitespace();
+            c2 = c;
         }
         return iPath;
     }

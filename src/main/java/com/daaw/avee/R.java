@@ -54,6 +54,8 @@ public final class R {
         public static final int white = 2023;
         public static final int black = 2024;
         public static final int rainbow128 = 2025;
+        public static final int year2017 = 2026;
+        public static final int year2018 = 2027;
     }
 
     public static final class string {
@@ -106,6 +108,8 @@ public final class R {
         ID_TO_PATH.put(drawable.white, "/drawable/white.png");
         ID_TO_PATH.put(drawable.black, "/drawable/black.png");
         ID_TO_PATH.put(drawable.rainbow128, "/drawable/rainbow128.png");
+        ID_TO_PATH.put(drawable.year2017, "/drawable/year2017.png");
+        ID_TO_PATH.put(drawable.year2018, "/drawable/year2018.png");
     }
 
     public static String resolveResourcePath(int id) {

@@ -2,6 +2,7 @@ package android.graphics;
 
 import android.content.res.AssetManager;
 import java.awt.Font;
+import java.io.File;
 import java.io.InputStream;
 
 public class Typeface {
@@ -30,6 +31,16 @@ public class Typeface {
                     Font f = Font.createFont(Font.TRUETYPE_FONT, is);
                     return new Typeface(f);
                 }
+            } catch (Exception ignored) {
+            }
+        }
+        return DEFAULT;
+    }
+
+    public static Typeface createFromFile(File file) {
+        if (file != null && file.isFile()) {
+            try {
+                return new Typeface(Font.createFont(Font.TRUETYPE_FONT, file));
             } catch (Exception ignored) {
             }
         }

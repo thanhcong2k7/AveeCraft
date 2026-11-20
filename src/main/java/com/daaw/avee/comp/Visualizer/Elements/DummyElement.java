@@ -126,8 +126,16 @@ public class DummyElement extends Element {
         super.onApplyCustomization(customPropertiesList);
         super.onApplyCustomizationAdditional(customPropertiesList);
         setTargetImage(customPropertiesList.getPropertyString("TargetImage", "composition:1"));
-        this.shaderVert = customPropertiesList.getPropertyString("ShaderVertex", this.shaderVert);
-        this.shaderFrag = customPropertiesList.getPropertyString("ShaderFrag", this.shaderFrag);
+        String v = customPropertiesList.getPropertyString("shaderVertex", "");
+        if (v == null || v.isEmpty()) {
+            v = customPropertiesList.getPropertyString("ShaderVertex", this.shaderVert);
+        }
+        this.shaderVert = v;
+        String f = customPropertiesList.getPropertyString("shaderFragment", "");
+        if (f == null || f.isEmpty()) {
+            f = customPropertiesList.getPropertyString("ShaderFrag", this.shaderFrag);
+        }
+        this.shaderFrag = f;
         for (String propertyName : u_values.keySet()) {
             MVariableFloat variableFloat = customPropertiesList.getPropertyMVariableFloat(propertyName, u_values.get(propertyName));
             u_values.put(propertyName, variableFloat);

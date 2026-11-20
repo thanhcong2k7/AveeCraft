@@ -53,8 +53,13 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     private final Random random = new Random();
     private final Vec2f shakePoint = new Vec2f(0f, 0f);
     private final Vec2f shakePointSmooth = new Vec2f(0f, 0f);
+    private final com.daaw.avee.Design.HandheldMotion handheldMotionSmooth =
+            new com.daaw.avee.Design.HandheldMotion(com.daaw.avee.Design.HandheldMotion.Jarles_Presets_MoreMovement_Smoothest);
+    private final com.daaw.avee.Design.HandheldMotion handheldMotionLotOfShake =
+            new com.daaw.avee.Design.HandheldMotion(com.daaw.avee.Design.HandheldMotion.Jarles_Presets_LotsOshake);
     private float totalTimeWhenPlaying = 0f;
     private float totalTimeSec = 0f;
+    private volatile int latestFrameTimeMs = 16;
     private FrameStats latestStats;
 
     public DesktopAudioEngine() {
@@ -239,6 +244,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     }
 
     public void tickFrame(float dtSec) {
+        latestFrameTimeMs = Math.max(1, Math.round(dtSec * 1000f));
         totalTimeSec += dtSec;
         if (isPlaying()) {
             totalTimeWhenPlaying += dtSec;
@@ -310,19 +316,57 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     }
 
     @Override
-    public String onRequestsMeasureText(String token) {
-        if (token == null) return "";
+    public String onRequestsMeasureText(String str) {
+        if (str == null) return "";
+        int len = str.length();
+        StringBuilder out = new StringBuilder(Math.max(32, len));
+        int braceStart = -1;
+        for (int i = 0; i < len; i++) {
+            char ch = str.charAt(i);
+            if (ch == '{') {
+                if (braceStart >= 0) {
+                    out.append(str, braceStart, i);
+                }
+                braceStart = i;
+            } else if (ch == '}' && braceStart >= 0) {
+                out.append(getMeasurePlaceholderValue(str.substring(braceStart, i + 1)));
+                braceStart = -1;
+            } else if (braceStart < 0) {
+                out.append(ch);
+            }
+        }
+        if (braceStart >= 0) {
+            out.append(str, braceStart, len);
+        }
+        return out.toString();
+    }
+
+    private String getMeasurePlaceholderValue(String token) {
         if (MeasureDefs.textTitle.equals(token)) return currentTitle;
         if (MeasureDefs.textArtist.equals(token)) return currentArtist;
-        if (MeasureDefs.textArtistAndTitle.equals(token) || MeasureDefs.textMarkedArtistAndTitle.equals(token)
-                || MeasureDefs.textArtistOrTitle.equals(token)) {
-            return currentArtist + " - " + currentTitle;
+        if (MeasureDefs.textArtistOrTitle.equals(token)) {
+            return (currentArtist != null && !currentArtist.isEmpty() && !"Local Audio".equals(currentArtist))
+                    ? currentArtist : currentTitle;
+        }
+        if (MeasureDefs.textArtistAndTitle.equals(token)) {
+            return (currentArtist != null && !currentArtist.isEmpty())
+                    ? (currentArtist + "\n" + currentTitle) : ("\n" + currentTitle);
+        }
+        if (MeasureDefs.textMarkedArtistAndTitle.equals(token)) {
+            return (currentArtist != null && !currentArtist.isEmpty())
+                    ? ("AveeCraft\n" + currentArtist + " - " + currentTitle) : ("AveeCraft\n" + currentTitle);
         }
         if (MeasureDefs.textAlbum.equals(token)) return "AveeCraft";
         if (MeasureDefs.textTimeCurrent.equals(token)) return formatTime(getPositionMs());
         if (MeasureDefs.textTimeLength.equals(token)) return formatTime(durationMs);
         if (MeasureDefs.textTimeRemaining.equals(token)) return formatTime(Math.max(0L, durationMs - getPositionMs()));
-        if (MeasureDefs.textFps.equals(token) && latestStats != null) return String.valueOf(latestStats.fps);
+        if (MeasureDefs.textFps.equals(token)) return latestStats != null ? String.valueOf(latestStats.getFps()) : "0";
+        if (MeasureDefs.textFrameTime.equals(token)) return String.valueOf(latestFrameTimeMs);
+        if (MeasureDefs.textStatFlush.equals(token)) return latestStats != null ? String.valueOf(latestStats.getStatFlushCount()) : "0";
+        if (MeasureDefs.textWaitResLoad.equals(token)) return latestStats != null ? String.valueOf(latestStats.getFrameResourcesLoadingCount()) : "0";
+        if (MeasureDefs.textResLoad.equals(token)) return latestStats != null ? String.valueOf(latestStats.getStatResourceLoadCount()) : "0";
+        if (MeasureDefs.textGradualResLoad.equals(token)) return latestStats != null ? String.valueOf(latestStats.getStatGradualResourceLoadCount()) : "0";
+        if (MeasureDefs.textRTSwitch.equals(token)) return latestStats != null ? String.valueOf(latestStats.getStatRTSwitchCount()) : "0";
         return token;
     }
 
@@ -360,23 +404,59 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             float m3 = m * m * m;
             return new Vec2f(shakePointSmooth.x * m3 * arg.x * 0.025f, shakePointSmooth.y * m3 * arg.x * 0.025f);
         }
-        if (MeasureDefs.beatCamShakeMore.equals(str) || MeasureDefs.beatCamShakeLess.equals(str)) {
-            float m = Math.max(0f, Math.min(1f, isPlaying() ? rms * 2.5f : 0f));
-            float m2 = m * m;
-            float amp = MeasureDefs.beatCamShakeMore.equals(str) ? 0.06f : 0.03f;
-            Vec2f v = new Vec2f(
-                    (float) Math.sin(totalFrameTimeF * 2.3 * arg.y) * arg.x * m2 * amp,
-                    (float) Math.cos(totalFrameTimeF * 1.9 * arg.y) * arg.x * m2 * amp);
-            Interpolate.Lerp(v, prev, v, 0.8);
-            return v;
+        if (MeasureDefs.beatCamShakeMore.equals(str)) {
+            float max = Math.max(Math.min(isPlaying() ? rms * 2.5f : 0.0f, 1.0f), 0.0f);
+            float f3 = max * max;
+            Vec2f pos = handheldMotionLotOfShake.getPos((((totalFrameTimeF * 0.5f) * max) * arg.y) % 1.0f);
+            pos.x = (pos.x - 0.5f) * arg.x * f3 * 0.06f;
+            pos.y = (pos.y - 0.5f) * arg.x * f3 * 0.06f;
+            Interpolate.Lerp(pos, prev, pos, 0.800000011920929d);
+            return pos;
         }
-        if (MeasureDefs.constantCamShakeMore.equals(str) || MeasureDefs.constantCamShakeLess.equals(str)) {
-            float amp = MeasureDefs.constantCamShakeMore.equals(str) ? 0.05f : 0.02f;
-            Vec2f v = new Vec2f(
-                    (float) Math.sin(totalFrameTimeF * 1.7 * arg.y) * arg.x * amp,
-                    (float) Math.cos(totalFrameTimeF * 1.3 * arg.y) * arg.x * amp);
-            Interpolate.Lerp(v, prev, v, 0.1);
-            return v;
+        if (MeasureDefs.beatCamShakeLess.equals(str)) {
+            float max = Math.max(Math.min(isPlaying() ? rms * 2.5f : 0.0f, 1.0f), 0.0f);
+            float f3 = max * max;
+            Vec2f pos = handheldMotionSmooth.getPos((((totalFrameTimeF * 0.5f) * max) * arg.y) % 1.0f);
+            pos.x = (pos.x - 0.5f) * arg.x * f3 * 0.06f;
+            pos.y = (pos.y - 0.5f) * arg.x * f3 * 0.06f;
+            Interpolate.Lerp(pos, prev, pos, 0.800000011920929d);
+            return pos;
+        }
+        if (MeasureDefs.constantCamShakeMore.equals(str)) {
+            Vec2f pos = handheldMotionLotOfShake.getPos(((totalFrameTimeF * 0.5f) * arg.y) % 1.0f);
+            pos.x = (pos.x - 0.5f) * arg.x * 0.06f;
+            pos.y = (pos.y - 0.5f) * arg.x * 0.06f;
+            Interpolate.Lerp(pos, prev, pos, 0.10000000149011612d);
+            return pos;
+        }
+        if (MeasureDefs.constantCamShakeLess.equals(str)) {
+            Vec2f pos = handheldMotionSmooth.getPos(((totalFrameTimeF * 0.5f) * arg.y) % 1.0f);
+            pos.x = (pos.x - 0.5f) * arg.x * 0.06f;
+            pos.y = (pos.y - 0.5f) * arg.x * 0.06f;
+            Interpolate.Lerp(pos, prev, pos, 0.10000000149011612d);
+            return pos;
+        }
+        if (MeasureDefs.constantCamShakeRotMore.equals(str)) {
+            double rot = handheldMotionLotOfShake.getRot(((totalFrameTimeF * 0.5f) * arg.y) % 1.0f);
+            float lerp = Interpolate.Lerp(prev.x, ((float) (rot / 6.283185307179586d)) * arg.x * 0.5f, 0.10000000149011612d);
+            return new Vec2f(lerp, lerp);
+        }
+        if (MeasureDefs.constantCamShakeRotLess.equals(str)) {
+            double rot = handheldMotionSmooth.getRot(((totalFrameTimeF * 0.5f) * arg.y) % 1.0f);
+            float lerp = Interpolate.Lerp(prev.x, ((float) (rot / 6.283185307179586d)) * arg.x * 0.5f, 0.10000000149011612d);
+            return new Vec2f(lerp, lerp);
+        }
+        if (MeasureDefs.beatCamShakeRotMore.equals(str)) {
+            float max = Math.max(Math.min(isPlaying() ? rms * 2.5f : 0.0f, 1.0f), 0.0f);
+            double rot = handheldMotionLotOfShake.getRot(((totalFrameTimeF * 0.5f) * arg.y) % 1.0f);
+            float lerp = Interpolate.Lerp(prev.x, ((float) (rot / 6.283185307179586d)) * arg.x * 0.5f * max * max, 0.800000011920929d);
+            return new Vec2f(lerp, lerp);
+        }
+        if (MeasureDefs.beatCamShakeRotLess.equals(str)) {
+            float max = Math.max(Math.min(isPlaying() ? rms * 2.5f : 0.0f, 1.0f), 0.0f);
+            double rot = handheldMotionSmooth.getRot(((totalFrameTimeF * 0.5f) * arg.y) % 1.0f);
+            float lerp = Interpolate.Lerp(prev.x, ((float) (rot / 6.283185307179586d)) * arg.x * 0.5f * max * max, 0.800000011920929d);
+            return new Vec2f(lerp, lerp);
         }
         if (MeasureDefs.peakBarIndex.equals(str) && meterOut != null) {
             float v = Interpolate.Lerp(meterOut.peakBarIndex, prev.x, arg.y);

@@ -181,6 +181,12 @@ public class CustomScene implements ICustomization<CustomComposition> {
         resetEntries();
     }
 
+    public void removeEntry(int i) {
+        if (this.jsonArray != null && i >= 0 && i < this.jsonArray.length()) {
+            this.jsonArray.remove(i);
+        }
+    }
+
     public void setEntry(int i, CustomComposition customComposition) {
         try {
             this.jsonArray.put(i, customComposition.jsonObj);

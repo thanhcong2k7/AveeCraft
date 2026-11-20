@@ -454,6 +454,265 @@ public class EditorVerifier {
             System.out.println("Export " + pref + " OK size=" + expOut.length() + " streams=[" + fpOut.replace('\n', ';') + "] -> " + gpuLine);
         }
 
+        // Verify Composition deletion & AppLogo deletion do not crash or respawn AppLogo
+        java.util.List<Object> vHolders = new java.util.ArrayList<>();
+        com.daaw.avee.comp.Visualizer.Elements.Composition.onRequest.subscribeWeak(
+                (com.daaw.avee.Common.Events.WeakEventR1.Handler<Object, Boolean>) c -> true, vHolders);
+        CustomScene delScene = VizArchiveManager.loadPreset(0);
+        com.daaw.avee.comp.Visualizer.CustomComposition extraComp = delScene.createDataEntry();
+        extraComp.putChildTypeValue("Composition");
+        rc.setThemeElements(delScene);
+        delScene = VizArchiveManager.readLiveScene(delScene, rc, null);
+        int compBefore = delScene.getEntryCount();
+        if (compBefore < 2) throw new AssertionError("Expected >=2 compositions before delete test");
+        delScene.removeEntry(compBefore - 1);
+        com.daaw.avee.comp.Visualizer.CustomComposition c0 = delScene.getEntry(0);
+        for (int i = c0.getEntryCount() - 1; i >= 0; i--) {
+            if ("AppLogo".equals(c0.getData(i).getTypeName(""))) {
+                c0.removeEntry(i);
+            }
+        }
+        rc.setThemeElements(delScene);
+        GLES20.setRedirectFramebuffer0(fbo);
+        rc.onDrawFrame(null);
+        GLES20.setRedirectFramebuffer0(0);
+        CustomScene afterDel = VizArchiveManager.readLiveScene(delScene, rc, null);
+        if (afterDel.getEntryCount() != compBefore - 1) {
+            throw new AssertionError("Composition deletion count mismatch: " + afterDel.getEntryCount());
+        }
+        com.daaw.avee.comp.Visualizer.CustomComposition afterC0 = afterDel.getEntry(0);
+        for (int i = 0; i < afterC0.getEntryCount(); i++) {
+            if ("AppLogo".equals(afterC0.getData(i).getTypeName(""))) {
+                throw new AssertionError("AppLogo respawned after deletion!");
+            }
+        }
+        System.out.println("Composition & AppLogo deletion OK (comps=" + afterDel.getEntryCount() + ")");
+
+        // Verify BlurEffect actually blurs sharp edges into smooth gradient pixels
+        CustomScene blurScene = CustomScene.Create();
+        CustomComposition bComp0 = blurScene.createDataEntry();
+        bComp0.putChildTypeValue("Composition");
+        CustomPropertiesList blurProps = bComp0.createDataEntry();
+        blurProps.putChildTypeValue("BlurEffect");
+        blurProps.putPropertyIntValue("sourceCompositionIndex", 1);
+        blurProps.putPropertyFloatValue("blurRadius", 2.5f);
+        blurProps.putPropertyFloatValue("blurMultiplier", 4.1f);
+        blurProps.putPropertyBoolValue("showUnblurredContent", false);
+        blurProps.putPropertyBoolValue("showUnblurredContentUnder", false);
+        blurProps.putPropertyVec2fValue("1layerScale", new com.daaw.avee.Common.Vec2f(1.0f, 1.0f));
+        blurProps.putPropertyVec2fValue("2layerScale", new com.daaw.avee.Common.Vec2f(0.0f, 0.0f));
+        blurProps.putPropertyVec2fValue("3layerScale", new com.daaw.avee.Common.Vec2f(0.0f, 0.0f));
+
+        CustomComposition bComp1 = blurScene.createDataEntry();
+        bComp1.putChildTypeValue("Composition");
+        CustomPropertiesList sqProps = bComp1.createDataEntry();
+        sqProps.putChildTypeValue("Image");
+        sqProps.putPropertyStringValue("customImage", "internalres:white");
+        sqProps.putPropertyVec2fValue("scale", new com.daaw.avee.Common.Vec2f(0.35f, 0.35f));
+
+        rc.setThemeElements(blurScene);
+        CustomScene liveBlurScene = VizArchiveManager.readLiveScene(blurScene, rc, null);
+        String blurBlend = liveBlurScene.getEntry(0).getData(0).getChild("blendMode").getTypeName("");
+        if (!"Add".equals(blurBlend)) {
+            throw new AssertionError("Default BlurEffect blendMode mismatch: expected Add, got " + blurBlend);
+        }
+        for (int f = 0; f < 4; f++) {
+            Looper.drainMainQueue();
+            audio.tickFrame(0.016f);
+            GLES20.setRedirectFramebuffer0(fbo);
+            rc.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+        }
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
+        Bitmap blurredBmp = GraphicsUtils.savePixels(0, 0, w, h, null);
+        int transitionPixels = 0;
+        int blurredCenterR = (blurredBmp.getPixel(w / 2, h / 2) >> 16) & 0xFF;
+        for (int x = 0; x < w; x++) {
+            int rChVal = (blurredBmp.getPixel(x, h / 2) >> 16) & 0xFF;
+            if (rChVal > 40 && rChVal < 230) {
+                transitionPixels++;
+            }
+        }
+        if (blurredCenterR <= 100 || transitionPixels < 10) {
+            throw new AssertionError("BlurEffect failed to blur! centerR=" + blurredCenterR + " transitionPixels=" + transitionPixels);
+        }
+
+        blurProps.putPropertyFloatValue("blurRadius", 0.0f);
+        rc.setThemeElements(blurScene);
+        for (int f = 0; f < 2; f++) {
+            Looper.drainMainQueue();
+            audio.tickFrame(0.016f);
+            GLES20.setRedirectFramebuffer0(fbo);
+            rc.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+        }
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
+        Bitmap sharpBmp = GraphicsUtils.savePixels(0, 0, w, h, null);
+        int sharpTransitionPixels = 0;
+        for (int x = 0; x < w; x++) {
+            int rChVal = (sharpBmp.getPixel(x, h / 2) >> 16) & 0xFF;
+            if (rChVal > 40 && rChVal < 230) {
+                sharpTransitionPixels++;
+            }
+        }
+        if (sharpTransitionPixels >= transitionPixels) {
+            throw new AssertionError("BlurEffect blurRadius=0 not sharper than blurred! sharp=" + sharpTransitionPixels + " blurred=" + transitionPixels);
+        }
+        System.out.println("BlurEffect verification OK (blend=" + blurBlend + " blurredTransitionPx=" + transitionPixels + " sharpTransitionPx=" + sharpTransitionPixels + " centerR=" + blurredCenterR + ")");
+
+        // Verify dynamic composition linking & font asset options
+        java.util.List<String> imgOpts = PropertyInspectorPanel.buildMediaOptions(
+                com.daaw.avee.comp.Visualizer.Elements.Base.ElementImageLoader.internalImages, false, false, 4);
+        if (!imgOpts.contains("composition:1") || !imgOpts.contains("composition:2") || !imgOpts.contains("composition:3")
+                || imgOpts.contains("composition:0")) {
+            throw new AssertionError("Composition linking options mismatch: " + imgOpts);
+        }
+        java.util.List<String> fontOpts = PropertyInspectorPanel.buildMediaOptions(
+                com.daaw.avee.comp.Visualizer.Elements.TextElement.fontTypefaces, true, false, 3);
+        if (!fontOpts.contains("internal_0") || !fontOpts.contains("internal_1")
+                || !fontOpts.contains("internal_2") || !fontOpts.contains("internal_3")
+                || fontOpts.contains("internal_0:2131230895")) {
+            throw new AssertionError("Font asset options mismatch: " + fontOpts);
+        }
+        System.out.println("Composition linking & media options OK");
+
+        // Verify MeasuredVar.FromString fallback & DesktopAudioEngine measure parity
+        com.daaw.avee.comp.Visualizer.Elements.Base.MeasuredVar fallback =
+                new com.daaw.avee.comp.Visualizer.Elements.Base.MeasuredVar("Constant", 2.5f, 3.5f);
+        com.daaw.avee.comp.Visualizer.Elements.Base.MeasuredVar parsedFallback =
+                com.daaw.avee.comp.Visualizer.Elements.Base.MeasuredVar.FromString("broken", fallback);
+        if (parsedFallback == null
+                || Math.abs(parsedFallback.getMeasureArgVec2f().x - 2.5f) > 1e-4f
+                || Math.abs(parsedFallback.getMeasureArgVec2f().y - 3.5f) > 1e-4f) {
+            throw new AssertionError("MeasuredVar.FromString fallback failed: " + parsedFallback);
+        }
+        String expanded = audio.onRequestsMeasureText("Song: {Title} [{TimeCurrent}]");
+        if (expanded.contains("{Title}") || expanded.contains("{TimeCurrent}")) {
+            throw new AssertionError("MeasureText expansion failed: " + expanded);
+        }
+        com.daaw.avee.Common.Vec2f rotShake = audio.onRequestMeasureVec2f(
+                com.daaw.avee.comp.Common.MeasureDefs.constantCamShakeRotMore,
+                new com.daaw.avee.Common.Vec2f(1f, 1f),
+                new com.daaw.avee.Common.Vec2f(0f, 0f), null, null);
+        if (Float.isNaN(rotShake.x) || Float.isInfinite(rotShake.x) || Float.isNaN(rotShake.y) || Float.isInfinite(rotShake.y)) {
+            throw new AssertionError("constantCamShakeRotMore returned non-finite: " + rotShake);
+        }
+        System.out.println("MeasuredVar & measure parity OK");
+
+        // Verify cross-composition layer move (Up/Down step + direct cross-comp move)
+        CustomScene moveScene = CustomScene.Create();
+        CustomComposition mComp0 = moveScene.createDataEntry();
+        mComp0.putChildTypeValue("Composition");
+        CustomPropertiesList mA = mComp0.createDataEntry();
+        mA.putChildTypeValue("Image");
+        mA.setTagName("A");
+        CustomComposition mComp1 = moveScene.createDataEntry();
+        mComp1.putChildTypeValue("Composition");
+        CustomPropertiesList mB = mComp1.createDataEntry();
+        mB.putChildTypeValue("Bars");
+        mB.setTagName("B");
+        CustomPropertiesList mC = mComp1.createDataEntry();
+        mC.putChildTypeValue("Text");
+        mC.setTagName("C");
+        CustomComposition mComp2 = moveScene.createDataEntry();
+        mComp2.putChildTypeValue("Composition");
+        CustomPropertiesList mD = mComp2.createDataEntry();
+        mD.putChildTypeValue("BlurEffect");
+        mD.setTagName("D");
+
+        int[] upTarget = AveeEditorApp.computeStepMoveTarget(moveScene, 1, 0, -1);
+        if (upTarget == null || upTarget[0] != 0 || upTarget[1] != 1) {
+            throw new AssertionError("Step Up across comp target mismatch: " + java.util.Arrays.toString(upTarget));
+        }
+        int[] upRes = AveeEditorApp.moveElementInScene(moveScene, 1, 0, upTarget[0], upTarget[1]);
+        if (upRes == null || moveScene.getEntry(0).getEntryCount() != 2 || moveScene.getEntry(1).getEntryCount() != 1
+                || !"A".equals(moveScene.getEntry(0).getData(0).getTagName())
+                || !"B".equals(moveScene.getEntry(0).getData(1).getTagName())
+                || !"C".equals(moveScene.getEntry(1).getData(0).getTagName())) {
+            throw new AssertionError("Cross-comp Up move failed");
+        }
+        int[] downTarget = AveeEditorApp.computeStepMoveTarget(moveScene, 0, 1, 1);
+        if (downTarget == null || downTarget[0] != 1 || downTarget[1] != 0) {
+            throw new AssertionError("Step Down across comp target mismatch: " + java.util.Arrays.toString(downTarget));
+        }
+        int[] downRes = AveeEditorApp.moveElementInScene(moveScene, 0, 1, downTarget[0], downTarget[1]);
+        if (downRes == null || moveScene.getEntry(0).getEntryCount() != 1 || moveScene.getEntry(1).getEntryCount() != 2
+                || !"B".equals(moveScene.getEntry(1).getData(0).getTagName())
+                || !"C".equals(moveScene.getEntry(1).getData(1).getTagName())) {
+            throw new AssertionError("Cross-comp Down move failed");
+        }
+        int[] dragRes = AveeEditorApp.moveElementInScene(moveScene, 2, 0, 0, 0);
+        if (dragRes == null || moveScene.getEntry(0).getEntryCount() != 2 || moveScene.getEntry(2).getEntryCount() != 0
+                || !"D".equals(moveScene.getEntry(0).getData(0).getTagName())
+                || !"A".equals(moveScene.getEntry(0).getData(1).getTagName())) {
+            throw new AssertionError("Direct cross-comp drag move failed");
+        }
+        int[] emptyStep = AveeEditorApp.computeStepMoveTarget(moveScene, 1, 1, 1);
+        if (emptyStep == null || emptyStep[0] != 2 || emptyStep[1] != 0) {
+            throw new AssertionError("Step Down into empty comp target mismatch: " + java.util.Arrays.toString(emptyStep));
+        }
+        AveeEditorApp.moveElementInScene(moveScene, 1, 1, emptyStep[0], emptyStep[1]);
+        if (moveScene.getEntry(2).getEntryCount() != 1 || !"C".equals(moveScene.getEntry(2).getData(0).getTagName())) {
+            throw new AssertionError("Move into empty comp failed");
+        }
+
+        // Verify deleting Composition N merges all its layers to the bottom of Composition N-1 and remaps refs
+        CustomScene mergeScene = CustomScene.Create();
+        CustomComposition gComp0 = mergeScene.createDataEntry();
+        gComp0.putChildTypeValue("Composition");
+        CustomPropertiesList gA0 = gComp0.createDataEntry();
+        gA0.putChildTypeValue("Image");
+        gA0.setTagName("A0");
+        gA0.putPropertyStringValue("customImage", "composition:1");
+        CustomPropertiesList gA1 = gComp0.createDataEntry();
+        gA1.putChildTypeValue("Image");
+        gA1.setTagName("A1");
+        gA1.putPropertyStringValue("customImage", "composition:2");
+
+        CustomComposition gComp1 = mergeScene.createDataEntry();
+        gComp1.putChildTypeValue("Composition");
+        CustomPropertiesList gB1 = gComp1.createDataEntry();
+        gB1.putChildTypeValue("Bars");
+        gB1.setTagName("B1");
+        CustomPropertiesList gC1 = gComp1.createDataEntry();
+        gC1.putChildTypeValue("Text");
+        gC1.setTagName("C1");
+
+        CustomComposition gComp2 = mergeScene.createDataEntry();
+        gComp2.putChildTypeValue("Composition");
+        CustomPropertiesList gD2 = gComp2.createDataEntry();
+        gD2.putChildTypeValue("BlurEffect");
+        gD2.setTagName("D2");
+        gD2.putPropertyIntValue("sourceCompositionIndex", 2);
+
+        int movedLayers = AveeEditorApp.deleteCompositionMergingLayers(mergeScene, 1);
+        if (movedLayers != 2 || mergeScene.getEntryCount() != 2 || mergeScene.getEntry(0).getEntryCount() != 4) {
+            throw new AssertionError("Delete-comp merge count mismatch: moved=" + movedLayers
+                    + " comps=" + mergeScene.getEntryCount()
+                    + " c0=" + mergeScene.getEntry(0).getEntryCount());
+        }
+        String[] expectedTags = {"A0", "A1", "B1", "C1"};
+        for (int i = 0; i < expectedTags.length; i++) {
+            String tag = mergeScene.getEntry(0).getData(i).getTagName();
+            if (!expectedTags[i].equals(tag)) {
+                throw new AssertionError("Merged layer order mismatch at " + i + ": expected " + expectedTags[i] + " got " + tag);
+            }
+        }
+        if (!"".equals(mergeScene.getEntry(0).getData(0).getPropertyString("customImage", "x"))
+                || !"composition:1".equals(mergeScene.getEntry(0).getData(1).getPropertyString("customImage", ""))
+                || mergeScene.getEntry(1).getData(0).getPropertyInt("sourceCompositionIndex", -1) != 1) {
+            throw new AssertionError("Composition ref remap after merge-delete failed");
+        }
+        rc.setThemeElements(mergeScene);
+        for (int f = 0; f < 2; f++) {
+            Looper.drainMainQueue();
+            audio.tickFrame(0.016f);
+            GLES20.setRedirectFramebuffer0(fbo);
+            rc.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+        }
+        System.out.println("Cross-composition move & delete-comp layer merge OK");
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);

@@ -98,6 +98,12 @@ public class CustomComposition extends CustomPropertiesList implements ICustomiz
         resetEntries();
     }
 
+    public void removeEntry(int i) {
+        if (this.jsonArray != null && i >= 0 && i < this.jsonArray.length()) {
+            this.jsonArray.remove(i);
+        }
+    }
+
     public void setEntry(int i, CustomPropertiesList customPropertiesList) {
         try {
             this.jsonArray.put(i, customPropertiesList.jsonObj);

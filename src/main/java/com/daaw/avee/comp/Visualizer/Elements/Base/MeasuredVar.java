@@ -1,5 +1,6 @@
 package com.daaw.avee.comp.Visualizer.Elements.Base;
 
+import com.daaw.avee.Common.Utils;
 import com.daaw.avee.Common.Vec2f;
 import com.daaw.avee.comp.Common.MeasureDefs;
 import com.daaw.avee.comp.Visualizer.CustomPropertiesList;
@@ -116,33 +117,23 @@ public class MeasuredVar {
         }
     }
 
-    /* JADX WARN: Code restructure failed: missing block: B:15:0x003e, code lost:
-        return r6.clone();
-     */
-    /*
-        Code decompiled incorrectly, please refer to instructions dump.
-    */
     public static MeasuredVar FromString(String str, MeasuredVar measuredVar) {
         if (str == null) {
-            if (measuredVar != null) {
-                return measuredVar.m7clone();
-            }
-            return null;
+            return measuredVar != null ? measuredVar.m7clone() : null;
         }
-        try {
-            int indexOf = str.indexOf(" ");
-            int i = indexOf + 1;
-            int indexOf2 = str.indexOf(" ", i);
-            if (indexOf >= 0 && indexOf2 >= 0) {
-                return new MeasuredVar(str.substring(0, indexOf), Float.parseFloat(str.substring(i, indexOf2)), Float.parseFloat(str.substring(indexOf2 + 1)));
-            }
-            return null;
-        } catch (NumberFormatException unused) {
-            if (measuredVar != null) {
-                return measuredVar.m7clone();
-            }
-            return null;
+        int indexOf = str.indexOf(32);
+        if (indexOf < 0) {
+            return measuredVar != null ? measuredVar.m7clone() : null;
         }
+        int i = indexOf + 1;
+        int indexOf2 = str.indexOf(32, i);
+        if (indexOf2 < 0) {
+            return measuredVar != null ? measuredVar.m7clone() : null;
+        }
+        String substring = str.substring(0, indexOf);
+        String substring2 = str.substring(i, indexOf2);
+        String substring3 = str.substring(indexOf2 + 1);
+        return new MeasuredVar(substring, Utils.strToFloatSafe(substring2, 0.0f), Utils.strToFloatSafe(substring3, 0.0f));
     }
 
     public String getMeasure() {

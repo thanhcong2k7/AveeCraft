@@ -4,12 +4,14 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.opengl.GLES20;
 import android.os.Looper;
+import com.daaw.avee.Common.Events.WeakEventR1;
 import com.daaw.avee.Common.tlog;
 import com.daaw.avee.PlayerCore;
 import com.daaw.avee.comp.Visualizer.CustomComposition;
 import com.daaw.avee.comp.Visualizer.CustomPropertiesList;
 import com.daaw.avee.comp.Visualizer.CustomScene;
 import com.daaw.avee.comp.Visualizer.Elements.Base.Element;
+import com.daaw.avee.comp.Visualizer.Elements.Composition;
 import com.daaw.avee.comp.Visualizer.Elements.ElementsFactory;
 import com.daaw.avee.comp.Visualizer.Graphic.GraphicsUtils;
 import com.daaw.avee.comp.Visualizer.Graphic.RendererCore;
@@ -66,6 +68,7 @@ public class AveeEditorApp extends Application {
 
     private int selectedCompIdx = 0;
     private int selectedElemIdx = -1; // -1 selects the composition itself
+    private int[] activeDragPayload = null;
 
     private int previewW = 1280;
     private int previewH = 720;
@@ -84,6 +87,10 @@ public class AveeEditorApp extends Application {
     private final float[] seekTmp = new float[1];
     private final int smokeFrames = Integer.getInteger("avee.smokeFrames", 0);
     private int frameCounter = 0;
+    private final List<Object> listenerHolders = new ArrayList<>();
+    private boolean aboutOpen = false;
+    private int aboutIconTex = 0;
+    private static final String REPO_URL = "https://github.com/thanhcong2k7/AveeCraft";
 
     @Override
     protected void configure(Configuration config) {
@@ -127,6 +134,7 @@ public class AveeEditorApp extends Application {
     protected void preRun() {
         super.preRun();
         applyWindowIcon();
+        Composition.onRequest.subscribeWeak((WeakEventR1.Handler<Object, Boolean>) c -> true, listenerHolders);
         Context ctx = PlayerCore.s().getAppContext();
         audioEngine = new DesktopAudioEngine();
         rendererCore = new RendererCore(ctx, ctx.getResources(), audioEngine);
@@ -160,6 +168,13 @@ public class AveeEditorApp extends Application {
                 icons.position(0);
                 GLFW.glfwSetWindowIcon(win, icons);
             } finally {
+                pixels.rewind();
+                aboutIconTex = GL11.glGenTextures();
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, aboutIconTex);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
+                GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
+                GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA8, w, h, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, pixels);
+                GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
                 MemoryUtil.memFree(pixels);
             }
         } catch (Throwable t) {
@@ -204,6 +219,10 @@ public class AveeEditorApp extends Application {
         inspector.dispose();
         if (audioEngine != null) {
             audioEngine.shutdown();
+        }
+        if (aboutIconTex != 0) {
+            GL11.glDeleteTextures(aboutIconTex);
+            aboutIconTex = 0;
         }
         deletePreviewFbo();
         super.postRun();
@@ -287,6 +306,7 @@ public class AveeEditorApp extends Application {
         ImGui.end();
 
         exportDialog.render(currentScene, rendererCore, audioEngine, previewW, previewH);
+        renderAboutDialog();
     }
 
     private void renderMainMenuBar() {
@@ -360,6 +380,13 @@ public class AveeEditorApp extends Application {
                 ImGui.endMenu();
             }
 
+            if (ImGui.beginMenu("Help")) {
+                if (ImGui.menuItem("About AveeCraft...")) {
+                    aboutOpen = true;
+                }
+                ImGui.endMenu();
+            }
+
             ImGui.sameLine(ImGui.getWindowWidth() - 420f);
             ImGui.textDisabled(statusMessage);
             ImGui.endMainMenuBar();
@@ -418,12 +445,14 @@ public class AveeEditorApp extends Application {
         }
 
         ImGui.beginChild("##TreeScroll", 0f, 0f, false);
+        int[] pendingDragMove = null;
         int compCount = currentScene.getEntryCount();
         for (int cIdx = 0; cIdx < compCount; cIdx++) {
             CustomComposition comp = currentScene.getEntry(cIdx);
             if (comp == null) continue;
             boolean compSelected = (selectedCompIdx == cIdx && selectedElemIdx == -1);
             int flags = ImGuiTreeNodeFlags.DefaultOpen | ImGuiTreeNodeFlags.OpenOnArrow
+                    | ImGuiTreeNodeFlags.SpanAvailWidth
                     | (compSelected ? ImGuiTreeNodeFlags.Selected : 0);
 
             String compLabel = "Composition " + cIdx + (cIdx == 0 ? " (Final)" : "");
@@ -435,8 +464,27 @@ public class AveeEditorApp extends Application {
                     rendererCore.triggerHighlightByIndices(cIdx, -1);
                 }
             }
+            if (ImGui.beginDragDropTarget()) {
+                int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", int[].class);
+                if (src != null && src.length == 2) {
+                    pendingDragMove = new int[]{src[0], src[1], cIdx, comp.getEntryCount()};
+                }
+                ImGui.endDragDropTarget();
+            }
             if (open) {
                 int elemCount = comp.getEntryCount();
+                if (elemCount == 0) {
+                    ImGui.pushStyleColor(ImGuiCol.Text, 0.55f, 0.55f, 0.55f, 1.0f);
+                    ImGui.selectable("  (empty - drop layer here)##empty_" + cIdx, false);
+                    ImGui.popStyleColor();
+                    if (ImGui.beginDragDropTarget()) {
+                        int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", int[].class);
+                        if (src != null && src.length == 2) {
+                            pendingDragMove = new int[]{src[0], src[1], cIdx, 0};
+                        }
+                        ImGui.endDragDropTarget();
+                    }
+                }
                 for (int eIdx = 0; eIdx < elemCount; eIdx++) {
                     CustomPropertiesList elem = comp.getData(eIdx);
                     if (elem == null) continue;
@@ -461,12 +509,31 @@ public class AveeEditorApp extends Application {
                             rendererCore.triggerHighlightByIndices(cIdx, eIdx);
                         }
                     }
+                    if (ImGui.beginDragDropSource()) {
+                        activeDragPayload = new int[]{cIdx, eIdx};
+                        ImGui.setDragDropPayload("AVEE_LAYER", activeDragPayload);
+                        ImGui.text("Move " + label + " (drop on any layer or Composition)");
+                        ImGui.endDragDropSource();
+                    }
+                    if (ImGui.beginDragDropTarget()) {
+                        int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", int[].class);
+                        if (src != null && src.length == 2) {
+                            pendingDragMove = new int[]{src[0], src[1], cIdx, eIdx};
+                        }
+                        ImGui.endDragDropTarget();
+                    }
                     ImGui.popID();
                 }
                 ImGui.treePop();
             }
         }
         ImGui.endChild();
+        if (pendingDragMove != null) {
+            moveElement(pendingDragMove[0], pendingDragMove[1], pendingDragMove[2], pendingDragMove[3]);
+            activeDragPayload = null;
+        } else if (!ImGui.isMouseDown(0)) {
+            activeDragPayload = null;
+        }
     }
 
     private void renderPreviewAndTransportPanel() {
@@ -559,11 +626,11 @@ public class AveeEditorApp extends Application {
         if (selectedElemIdx >= 0) {
             CustomPropertiesList elem = comp.getData(selectedElemIdx);
             String title = elem != null ? (elem.getTypeName("Element") + " (#" + selectedElemIdx + ")") : "Element";
-            if (inspector.render(title, elem)) {
+            if (inspector.render(title, elem, currentScene)) {
                 applySceneChanges(true);
             }
         } else {
-            if (inspector.render("Composition " + selectedCompIdx, comp)) {
+            if (inspector.render("Composition " + selectedCompIdx, comp, currentScene)) {
                 applySceneChanges(true);
             }
         }
@@ -657,10 +724,8 @@ public class AveeEditorApp extends Application {
         if (currentScene == null) return;
         CustomComposition comp = currentScene.getEntry(selectedCompIdx);
         if (comp == null) return;
-        Element el = ElementsFactory.create(typeName, "", null);
-        if (el == null) return;
+        if (ElementsFactory.create(typeName, "", null) == null) return;
         CustomPropertiesList newEntry = comp.createDataEntry();
-        el.getCustomization(newEntry, 0, name -> {});
         newEntry.putChildTypeValue(typeName);
         rendererCore.setThemeElements(currentScene);
         currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
@@ -692,62 +757,235 @@ public class AveeEditorApp extends Application {
         statusMessage = "Duplicated element";
     }
 
+    public static int[] computeStepMoveTarget(CustomScene scene, int compIdx, int elemIdx, int delta) {
+        if (scene == null || delta == 0 || compIdx < 0 || compIdx >= scene.getEntryCount()) {
+            return null;
+        }
+        CustomComposition srcComp = scene.getEntry(compIdx);
+        if (srcComp == null) {
+            return null;
+        }
+        int srcN = srcComp.getEntryCount();
+        if (elemIdx < 0 || elemIdx >= srcN) {
+            return null;
+        }
+        if (delta < 0) {
+            if (elemIdx > 0) {
+                return new int[]{compIdx, elemIdx - 1};
+            }
+            if (compIdx > 0) {
+                CustomComposition above = scene.getEntry(compIdx - 1);
+                return above != null ? new int[]{compIdx - 1, above.getEntryCount()} : null;
+            }
+            return null;
+        }
+        if (elemIdx < srcN - 1) {
+            return new int[]{compIdx, elemIdx + 1};
+        }
+        if (compIdx < scene.getEntryCount() - 1) {
+            return new int[]{compIdx + 1, 0};
+        }
+        return null;
+    }
+
+    public static int[] moveElementInScene(CustomScene scene, int srcCompIdx, int srcElemIdx, int dstCompIdx, int dstElemIdx) {
+        if (scene == null) return null;
+        CustomComposition srcComp = scene.getEntry(srcCompIdx);
+        CustomComposition dstComp = scene.getEntry(dstCompIdx);
+        if (srcComp == null || dstComp == null) return null;
+        int srcN = srcComp.getEntryCount();
+        if (srcElemIdx < 0 || srcElemIdx >= srcN) return null;
+
+        if (srcCompIdx == dstCompIdx) {
+            int clampedDst = Math.max(0, Math.min(srcN - 1, dstElemIdx));
+            if (clampedDst == srcElemIdx) return null;
+            List<CustomPropertiesList> items = new ArrayList<>(srcN);
+            for (int i = 0; i < srcN; i++) items.add(srcComp.getData(i));
+            CustomPropertiesList moving = items.remove(srcElemIdx);
+            items.add(clampedDst, moving);
+            for (int i = 0; i < srcN; i++) srcComp.setEntry(i, items.get(i));
+            return new int[]{dstCompIdx, clampedDst};
+        }
+        CustomPropertiesList moving = srcComp.getData(srcElemIdx);
+        if (moving == null) return null;
+        int dstN = dstComp.getEntryCount();
+        int insertIdx = Math.max(0, Math.min(dstN, dstElemIdx));
+        List<CustomPropertiesList> dstItems = new ArrayList<>(dstN + 1);
+        for (int i = 0; i < dstN; i++) dstItems.add(dstComp.getData(i));
+        CustomPropertiesList cloned = dstComp.createDataEntryClonedFrom(moving);
+        dstItems.add(insertIdx, cloned);
+        for (int i = 0; i < dstItems.size(); i++) dstComp.setEntry(i, dstItems.get(i));
+        srcComp.removeEntry(srcElemIdx);
+        return new int[]{dstCompIdx, insertIdx};
+    }
+
+    public static int deleteCompositionMergingLayers(CustomScene scene, int deletedIdx) {
+        if (scene == null || deletedIdx <= 0 || deletedIdx >= scene.getEntryCount()) {
+            return -1;
+        }
+        CustomComposition above = scene.getEntry(deletedIdx - 1);
+        CustomComposition victim = scene.getEntry(deletedIdx);
+        int moved = 0;
+        if (above != null && victim != null) {
+            for (int i = 0; i < victim.getEntryCount(); i++) {
+                CustomPropertiesList layer = victim.getData(i);
+                if (layer != null) {
+                    above.createDataEntryClonedFrom(layer);
+                    moved++;
+                }
+            }
+        }
+        scene.removeEntry(deletedIdx);
+        remapCompositionRefsAfterDelete(scene, deletedIdx);
+        return moved;
+    }
+
     private void moveSelectedElement(int delta) {
-        CustomComposition comp = currentScene.getEntry(selectedCompIdx);
-        if (comp == null || selectedElemIdx < 0) return;
-        int n = comp.getEntryCount();
-        int dst = selectedElemIdx + delta;
-        if (dst < 0 || dst >= n) return;
+        if (currentScene == null || selectedElemIdx < 0) return;
+        int[] target = computeStepMoveTarget(currentScene, selectedCompIdx, selectedElemIdx, delta);
+        if (target != null) {
+            moveElement(selectedCompIdx, selectedElemIdx, target[0], target[1]);
+        }
+    }
 
-        List<CustomPropertiesList> items = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) items.add(comp.getData(i));
-        CustomPropertiesList moving = items.remove(selectedElemIdx);
-        items.add(dst, moving);
-        for (int i = 0; i < n; i++) comp.setEntry(i, items.get(i));
-
-        selectedElemIdx = dst;
+    private void moveElement(int srcCompIdx, int srcElemIdx, int dstCompIdx, int dstElemIdx) {
+        int[] result = moveElementInScene(currentScene, srcCompIdx, srcElemIdx, dstCompIdx, dstElemIdx);
+        if (result == null) return;
+        selectedCompIdx = result[0];
+        selectedElemIdx = result[1];
         rendererCore.setThemeElements(currentScene);
         currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
-        statusMessage = "Reordered element";
+        if (currentScene != null && currentScene.getEntryCount() > 0) {
+            selectedCompIdx = Math.max(0, Math.min(selectedCompIdx, currentScene.getEntryCount() - 1));
+            CustomComposition refreshed = currentScene.getEntry(selectedCompIdx);
+            int refreshedN = refreshed != null ? refreshed.getEntryCount() : 0;
+            selectedElemIdx = refreshedN > 0 ? Math.max(0, Math.min(selectedElemIdx, refreshedN - 1)) : -1;
+        } else {
+            selectedCompIdx = 0;
+            selectedElemIdx = -1;
+        }
+        rendererCore.triggerHighlightByIndices(selectedCompIdx, selectedElemIdx);
+        statusMessage = (srcCompIdx != dstCompIdx) ? ("Moved layer to Composition " + dstCompIdx) : "Reordered layer";
     }
 
     private void deleteSelected() {
         CustomComposition comp = currentScene.getEntry(selectedCompIdx);
         if (comp == null) return;
         if (selectedElemIdx >= 0) {
-            int n = comp.getEntryCount();
-            List<CustomPropertiesList> keep = new ArrayList<>();
-            for (int i = 0; i < n; i++) {
-                if (i != selectedElemIdx) keep.add(comp.getData(i));
+            if (selectedElemIdx < comp.getEntryCount()) {
+                comp.removeEntry(selectedElemIdx);
+                rendererCore.setThemeElements(currentScene);
+                currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
+                int newCount = currentScene.getEntry(selectedCompIdx) != null
+                        ? currentScene.getEntry(selectedCompIdx).getEntryCount() : 0;
+                selectedElemIdx = newCount > 0 ? Math.min(selectedElemIdx, newCount - 1) : -1;
+                statusMessage = "Deleted layer";
             }
-            comp.removeAllEntries();
-            for (CustomPropertiesList item : keep) {
-                comp.createDataEntryClonedFrom(item);
-            }
-            rendererCore.setThemeElements(currentScene);
-            currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
-            selectedElemIdx = Math.min(selectedElemIdx, keep.size() - 1);
-            statusMessage = "Deleted element";
+        } else if (selectedCompIdx == 0) {
+            statusMessage = "Composition 0 (Final) cannot be deleted";
         } else if (selectedCompIdx > 0) {
-            int cCount = currentScene.getEntryCount();
-            List<CustomComposition> keep = new ArrayList<>();
-            for (int i = 0; i < cCount; i++) {
-                if (i != selectedCompIdx) keep.add(currentScene.getEntry(i));
+            int deletedIdx = selectedCompIdx;
+            int moved = deleteCompositionMergingLayers(currentScene, deletedIdx);
+            if (moved >= 0) {
+                rendererCore.setThemeElements(currentScene);
+                currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
+                selectedCompIdx = Math.max(0, Math.min(deletedIdx - 1, currentScene.getEntryCount() - 1));
+                selectedElemIdx = -1;
+                statusMessage = "Deleted Composition " + deletedIdx
+                        + (moved > 0 ? " (merged " + moved + " layer" + (moved == 1 ? "" : "s")
+                        + " into Composition " + (deletedIdx - 1) + ")" : "");
             }
-            currentScene.removeAllEntries();
-            for (int i = 0; i < keep.size(); i++) {
-                CustomComposition dst = currentScene.createDataEntry();
-                CustomComposition src = keep.get(i);
-                for (int e = 0; e < src.getEntryCount(); e++) {
-                    dst.createDataEntryClonedFrom(src.getData(e));
+        }
+    }
+
+    private static void remapCompositionRefsAfterDelete(CustomScene scene, int deletedIdx) {
+        if (scene == null) return;
+        for (int c = 0; c < scene.getEntryCount(); c++) {
+            CustomComposition comp = scene.getEntry(c);
+            if (comp == null) continue;
+            for (int e = 0; e < comp.getEntryCount(); e++) {
+                CustomPropertiesList elem = comp.getData(e);
+                if (elem == null) continue;
+                for (String prop : new String[]{"TargetImage", "targetImage", "customImage", "MaskImage"}) {
+                    String val = elem.getPropertyString(prop, "");
+                    if (val != null && val.startsWith("composition:")) {
+                        try {
+                            int ref = Integer.parseInt(val.substring("composition:".length()).trim());
+                            if (ref == deletedIdx) {
+                                elem.putPropertyStringValue(prop, "");
+                            } else if (ref > deletedIdx) {
+                                elem.putPropertyStringValue(prop, "composition:" + (ref - 1));
+                            }
+                        } catch (NumberFormatException ignored) {}
+                    }
+                }
+                if (elem.getPropertyType("sourceCompositionIndex") != null) {
+                    int ref = elem.getPropertyInt("sourceCompositionIndex", -1);
+                    if (ref == deletedIdx) {
+                        int fallback = Math.max(1, Math.min(deletedIdx - 1, Math.max(1, scene.getEntryCount() - 1)));
+                        elem.putPropertyIntValue("sourceCompositionIndex", fallback);
+                    } else if (ref > deletedIdx) {
+                        elem.putPropertyIntValue("sourceCompositionIndex", ref - 1);
+                    }
                 }
             }
-            rendererCore.setThemeElements(currentScene);
-            currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
-            selectedCompIdx = Math.max(0, selectedCompIdx - 1);
-            selectedElemIdx = -1;
-            statusMessage = "Deleted composition";
         }
+    }
+
+    private void renderAboutDialog() {
+        if (aboutOpen) {
+            ImGui.openPopup("About AveeCraft##Modal");
+            aboutOpen = false;
+        }
+        ImGuiViewport vp = ImGui.getMainViewport();
+        ImGui.setNextWindowPos(vp.getCenterX(), vp.getCenterY(), imgui.flag.ImGuiCond.Appearing, 0.5f, 0.5f);
+        ImGui.setNextWindowSize(480f, 0f, imgui.flag.ImGuiCond.Always);
+        if (ImGui.beginPopupModal("About AveeCraft##Modal", imgui.flag.ImGuiWindowFlags.NoResize)) {
+            if (aboutIconTex != 0) {
+                ImGui.image(aboutIconTex, 64f, 64f, 0f, 0f, 1f, 1f);
+                ImGui.sameLine();
+            }
+            ImGui.beginGroup();
+            ImGui.text("AveeCraft v1.0.0");
+            ImGui.textDisabled("Desktop Audio Visualizer Editor & GPU Video Exporter");
+            ImGui.endGroup();
+            ImGui.separator();
+            ImGui.spacing();
+            ImGui.textWrapped("Cross-platform Java/OpenGL visualizer studio, .viz template editor, and hardware-accelerated exporter ported from Android Avee Player.");
+            ImGui.spacing();
+            ImGui.text("Repository:");
+            ImGui.textColored(0.45f, 0.78f, 1.0f, 1.0f, REPO_URL);
+            if (ImGui.button("Open Repository", 150f, 0f)) {
+                openBrowserUrl(REPO_URL);
+            }
+            ImGui.sameLine();
+            if (ImGui.button("Copy URL", 100f, 0f)) {
+                ImGui.setClipboardText(REPO_URL);
+                statusMessage = "Copied repository URL";
+            }
+            ImGui.sameLine();
+            if (ImGui.button("Close", 100f, 0f)) {
+                ImGui.closeCurrentPopup();
+            }
+            ImGui.endPopup();
+        }
+    }
+
+    private static void openBrowserUrl(String url) {
+        try {
+            if (java.awt.Desktop.isDesktopSupported()) {
+                java.awt.Desktop.getDesktop().browse(new java.net.URI(url));
+                return;
+            }
+        } catch (Throwable ignored) {}
+        try {
+            String os = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT);
+            if (os.contains("win")) {
+                new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", url).start();
+            } else {
+                new ProcessBuilder("xdg-open", url).start();
+            }
+        } catch (Throwable ignored) {}
     }
 
     private void pickAndLoadAudio() {
