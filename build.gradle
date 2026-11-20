@@ -1,0 +1,79 @@
+import org.gradle.internal.os.OperatingSystem
+
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.daaw.avee'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+def lwjglVersion = '3.4.1'
+def imguiVersion = '1.87.7'
+def detectedOs = OperatingSystem.current().isWindows() ? 'windows'
+        : (OperatingSystem.current().isMacOsX() ? 'macos' : 'linux')
+def targetOs = (findProperty('targetOs') ?: detectedOs).toString().toLowerCase(Locale.ROOT)
+def lwjglNatives = "natives-${targetOs}"
+
+dependencies {
+    implementation "org.lwjgl:lwjgl:${lwjglVersion}"
+    implementation "org.lwjgl:lwjgl-glfw:${lwjglVersion}"
+    implementation "org.lwjgl:lwjgl-opengl:${lwjglVersion}"
+    implementation "org.lwjgl:lwjgl-tinyfd:${lwjglVersion}"
+
+    runtimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:${lwjglNatives}"
+    runtimeOnly "org.lwjgl:lwjgl-glfw:${lwjglVersion}:${lwjglNatives}"
+    runtimeOnly "org.lwjgl:lwjgl-opengl:${lwjglVersion}:${lwjglNatives}"
+    runtimeOnly "org.lwjgl:lwjgl-tinyfd:${lwjglVersion}:${lwjglNatives}"
+
+    implementation "io.github.spair:imgui-java-app:${imguiVersion}"
+    runtimeOnly "io.github.spair:imgui-java-natives-${targetOs}:${imguiVersion}"
+
+    implementation "org.json:json:20240303"
+}
+
+application {
+    mainClass = 'com.daaw.avee.editor.AveeEditorApp'
+    applicationName = 'AveeEditor'
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': 'com.daaw.avee.editor.AveeEditorApp'
+    }
+}
+
+tasks.register('stagePackageInput', Sync) {
+    dependsOn tasks.named('jar')
+    from tasks.named('jar')
+    from configurations.runtimeClasspath
+    into layout.buildDirectory.dir('package-input')
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+run {
+    workingDir = projectDir
+    systemProperty 'avee.smokeFrames', System.getProperty('avee.smokeFrames', '0')
+}
+
+tasks.register('verifyEditor', JavaExec) {
+    group = 'verification'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.daaw.avee.editor.EditorVerifier'
+    workingDir = projectDir
+    systemProperty 'avee.glTrace', System.getProperty('avee.glTrace', 'false')
+    systemProperty 'avee.dumpCompsDir', System.getProperty('avee.dumpCompsDir', '')
+}
