@@ -1,0 +1,126 @@
+name: Build AveeCraft Desktop Binaries (Windows & Linux)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os_label }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_label: linux-x64
+            target_os: linux
+          - runner: windows-latest
+            os_label: windows-x64
+            target_os: windows
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (with jpackage)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('build.gradle', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Grant execute permission for gradlew
+        if: runner.os != 'Windows'
+        run: chmod +x gradlew
+
+      - name: Compile and build Java-required distribution
+        run: ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} compileJava installDist
+
+      - name: Stage dependencies and build Standalone binary via jpackage
+        shell: bash
+        run: |
+          ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} stagePackageInput
+          mkdir -p build/jpackage
+          jpackage \
+            --type app-image \
+            --name AveeCraft \
+            --app-version "1.0.0" \
+            --vendor "AveeCraft" \
+            --description "AveeCraft — Desktop Audio Visualizer Editor & GPU Video Exporter" \
+            --input build/package-input \
+            --main-jar "AveeCraft-1.0.0.jar" \
+            --main-class com.daaw.avee.editor.AveeEditorApp \
+            --add-modules java.base,java.desktop,java.logging,java.management,java.naming,java.sql,java.xml,jdk.unsupported \
+            --java-options "-Xms256m" \
+            --java-options "-Xmx2048m" \
+            --dest build/jpackage
+
+      - name: Package Standalone & Java-required binaries
+        shell: bash
+        run: |
+          mkdir -p build/release
+          rm -rf build/staging
+          mkdir -p build/staging
+
+          # 1. Standalone (bundled JDK 21 runtime, no Java installation required)
+          cp -r build/jpackage/AveeCraft "build/staging/AveeCraft-${{ matrix.os_label }}-standalone"
+          if [ "${{ matrix.target_os }}" = "windows" ]; then
+            (cd build/staging && 7z a -tzip "../release/AveeCraft-${{ matrix.os_label }}-standalone.zip" "AveeCraft-${{ matrix.os_label }}-standalone")
+          else
+            chmod +x "build/staging/AveeCraft-${{ matrix.os_label }}-standalone/bin/AveeCraft"
+            tar -czf "build/release/AveeCraft-${{ matrix.os_label }}-standalone.tar.gz" -C build/staging "AveeCraft-${{ matrix.os_label }}-standalone"
+          fi
+
+          # 2. Java-required (smaller archive, requires Java 21+ on target machine)
+          cp -r build/install/AveeCraft "build/staging/AveeCraft-${{ matrix.os_label }}-java-required"
+          if [ "${{ matrix.target_os }}" = "windows" ]; then
+            (cd build/staging && 7z a -tzip "../release/AveeCraft-${{ matrix.os_label }}-java-required.zip" "AveeCraft-${{ matrix.os_label }}-java-required")
+          else
+            chmod +x "build/staging/AveeCraft-${{ matrix.os_label }}-java-required/bin/AveeCraft"
+            tar -czf "build/release/AveeCraft-${{ matrix.os_label }}-java-required.tar.gz" -C build/staging "AveeCraft-${{ matrix.os_label }}-java-required"
+          fi
+
+          ls -lh build/release
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AveeCraft-${{ matrix.os_label }}
+          path: |
+            build/release/*.zip
+            build/release/*.tar.gz
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

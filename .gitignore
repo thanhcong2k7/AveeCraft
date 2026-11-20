@@ -1,0 +1,7 @@
+build/
+.gradle/
+imgui.ini
+*.iml
+.idea/
+.vscode/
+.DS_Store

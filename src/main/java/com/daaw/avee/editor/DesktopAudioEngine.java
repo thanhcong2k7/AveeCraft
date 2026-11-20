@@ -318,7 +318,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                 || MeasureDefs.textArtistOrTitle.equals(token)) {
             return currentArtist + " - " + currentTitle;
         }
-        if (MeasureDefs.textAlbum.equals(token)) return "AveeEditor";
+        if (MeasureDefs.textAlbum.equals(token)) return "AveeCraft";
         if (MeasureDefs.textTimeCurrent.equals(token)) return formatTime(getPositionMs());
         if (MeasureDefs.textTimeLength.equals(token)) return formatTime(durationMs);
         if (MeasureDefs.textTimeRemaining.equals(token)) return formatTime(Math.max(0L, durationMs - getPositionMs()));

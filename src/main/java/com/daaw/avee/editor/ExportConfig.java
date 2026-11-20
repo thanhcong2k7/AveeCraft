@@ -52,7 +52,7 @@ public class ExportConfig {
     public int videoCodecProfileIdx = 0; // 0=High, 1=Main, 2=Baseline
 
     public String destinationDir = defaultExportDir();
-    public String filename = "avee_export";
+    public String filename = "aveecraft_export";
 
     public int width = 1920;
     public int height = 1080;
@@ -98,7 +98,7 @@ public class ExportConfig {
     }
 
     public File resolvedOutputFile() {
-        String name = (filename == null || filename.trim().isEmpty()) ? "avee_export" : filename.trim();
+        String name = (filename == null || filename.trim().isEmpty()) ? "aveecraft_export" : filename.trim();
         if (!name.toLowerCase().endsWith(".mp4")) {
             name = name + ".mp4";
         }

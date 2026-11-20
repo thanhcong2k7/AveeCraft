@@ -81,7 +81,7 @@ public class AveeEditorApp extends Application {
 
     @Override
     protected void configure(Configuration config) {
-        config.setTitle("Avee Player — Desktop Scene Editor");
+        config.setTitle("AveeCraft — Desktop Visualizer Editor");
         config.setWidth(1500);
         config.setHeight(880);
     }
@@ -219,7 +219,7 @@ public class AveeEditorApp extends Application {
                 | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoNavFocus;
 
         ImGui.pushStyleVar(imgui.flag.ImGuiStyleVar.WindowPadding, 6f, 6f);
-        ImGui.begin("##AveeEditorHost", hostFlags);
+        ImGui.begin("##AveeCraftHost", hostFlags);
         ImGui.popStyleVar();
 
         float totalW = ImGui.getContentRegionAvailX();
@@ -753,7 +753,7 @@ public class AveeEditorApp extends Application {
     }
 
     public static void main(String[] args) {
-        tlog.d("Starting Avee Player Desktop Editor...");
+        tlog.d("Starting AveeCraft...");
         if (Integer.getInteger("avee.smokeFrames", 0) > 0) {
             final Thread mainT = Thread.currentThread();
             Thread wd = new Thread(() -> {

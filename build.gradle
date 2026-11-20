@@ -44,7 +44,7 @@ dependencies {
 
 application {
     mainClass = 'com.daaw.avee.editor.AveeEditorApp'
-    applicationName = 'AveeEditor'
+    applicationName = 'AveeCraft'
 }
 
 jar {
