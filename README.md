@@ -17,7 +17,7 @@
 
 ## Download & Run Standalone Binaries
 
-GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) produces fully **standalone** portable archives and native installers for Windows (`x64`) and Linux (`x64`) with **OpenJDK 21 runtime and FFmpeg/FFprobe bundled** — no separate Java or FFmpeg installation is required:
+GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) produces fully **standalone** portable archives and native installers for Windows (`x64`) and Linux (`x64`) with **OpenJDK 21 runtime and FFmpeg/FFprobe bundled** - no separate Java or FFmpeg installation is required:
 
 | Platform | Type | Artifact | Launch / Install |
 |---|---|---|---|
