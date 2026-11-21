@@ -791,6 +791,128 @@ public class EditorVerifier {
         }
         System.out.println("UpdateManager verification OK (currentVersion=" + UpdateManager.getCurrentVersion() + ")");
 
+        // Verify MCP Bridge (live GL queue + token auth) AND real subprocess --mcp --headless stdio server
+        File mcpDir = java.nio.file.Files.createTempDirectory("avee_mcp_test_").toFile();
+        File testBridgeFile = new File(mcpDir, "mcp-bridge.json");
+        final CustomScene[] mcpSceneHolder = new CustomScene[]{VizArchiveManager.loadPreset(0)};
+        rc.setThemeElements(mcpSceneHolder[0]);
+        mcpSceneHolder[0] = VizArchiveManager.readLiveScene(mcpSceneHolder[0], rc, null);
+        final int[] mcpSel = new int[]{0, 0};
+        com.daaw.avee.mcp.SceneHost verifierHost = new com.daaw.avee.mcp.SceneHost() {
+            @Override public String getMode() { return "live"; }
+            @Override public boolean isReadOnly() { return false; }
+            @Override public CustomScene getScene() { return mcpSceneHolder[0]; }
+            @Override public void setScene(CustomScene s, boolean rebuild) {
+                mcpSceneHolder[0] = s;
+                if (rebuild) rc.setThemeElements(s); else rc.setThemeCustomizationData(s);
+            }
+            @Override public void refreshLiveScene() { mcpSceneHolder[0] = VizArchiveManager.readLiveScene(mcpSceneHolder[0], rc, null); }
+            @Override public RendererCore getRendererCore() { return rc; }
+            @Override public DesktopAudioEngine getAudioEngine() { return audio; }
+            @Override public int getSelectedCompIdx() { return mcpSel[0]; }
+            @Override public int getSelectedElemIdx() { return mcpSel[1]; }
+            @Override public void setSelection(int c, int e, boolean hi) { mcpSel[0] = c; mcpSel[1] = e; }
+            @Override public int getPreviewWidth() { return w; }
+            @Override public int getPreviewHeight() { return h; }
+            @Override public void setPreviewSize(int pw, int ph) {}
+            @Override public File getProjectFile() { return null; }
+            @Override public void setProjectFile(File f) {}
+            @Override public int getActivePresetIndex() { return 0; }
+            @Override public void setActivePresetIndex(int i) {}
+            @Override public void setStatusMessage(String m) {}
+            @Override public java.awt.image.BufferedImage capturePreviewImage(int advanceFrames, long seekMs) {
+                for (int f = 0; f < Math.max(1, advanceFrames); f++) {
+                    Looper.drainMainQueue();
+                    audio.tickFrame(0.016f);
+                    GLES20.setRedirectFramebuffer0(fbo);
+                    rc.onDrawFrame(null);
+                    GLES20.setRedirectFramebuffer0(0);
+                }
+                GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
+                Bitmap bmp = GraphicsUtils.savePixels(0, 0, w, h, null);
+                return bmp != null ? bmp.getBufferedImage() : null;
+            }
+            @Override public void captureWindowImageAsync(java.util.concurrent.CompletableFuture<java.awt.image.BufferedImage> fut) {
+                fut.complete(capturePreviewImage(1, -1L));
+            }
+        };
+        com.daaw.avee.mcp.AveeSceneService svc = new com.daaw.avee.mcp.AveeSceneService(verifierHost);
+        com.daaw.avee.mcp.McpBridgeServer bridge = new com.daaw.avee.mcp.McpBridgeServer(testBridgeFile, svc);
+        bridge.start();
+        try {
+            org.json.JSONObject disc = new org.json.JSONObject(java.nio.file.Files.readString(testBridgeFile.toPath()));
+            int bPort = disc.getInt("port");
+            try (java.net.Socket badSock = new java.net.Socket("127.0.0.1", bPort)) {
+                java.io.BufferedWriter bw = new java.io.BufferedWriter(new java.io.OutputStreamWriter(badSock.getOutputStream(), java.nio.charset.StandardCharsets.UTF_8));
+                java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(badSock.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
+                bw.write("{\"token\":\"wrong\",\"method\":\"get_state\"}\n");
+                bw.flush();
+                org.json.JSONObject badResp = new org.json.JSONObject(br.readLine());
+                if (badResp.optBoolean("ok", true)) {
+                    throw new AssertionError("MCP bridge accepted invalid token!");
+                }
+            }
+
+            com.daaw.avee.mcp.McpStdioServer liveRpc = new com.daaw.avee.mcp.McpStdioServer(testBridgeFile, false, true, false, 0, null);
+            java.util.concurrent.CompletableFuture<Void> bridgeTestFuture = java.util.concurrent.CompletableFuture.runAsync(() -> {
+                org.json.JSONObject stResp = new org.json.JSONObject(liveRpc.handleJsonRpcLine(
+                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_state\",\"arguments\":{}}}"));
+                String stText = stResp.getJSONObject("result").getJSONArray("content").getJSONObject(0).getString("text");
+                if (!new org.json.JSONObject(stText).getString("mode").equals("live")) {
+                    throw new RuntimeException("Expected live mode from bridge, got: " + stText);
+                }
+                org.json.JSONObject shotResp = new org.json.JSONObject(liveRpc.handleJsonRpcLine(
+                        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"screenshot_window\",\"arguments\":{\"maxWidth\":320}}}"));
+                org.json.JSONArray content = shotResp.getJSONObject("result").getJSONArray("content");
+                byte[] png = java.util.Base64.getDecoder().decode(content.getJSONObject(0).getString("data"));
+                if (png.length < 100 || (png[0] & 0xFF) != 0x89 || png[1] != 'P' || png[2] != 'N' || png[3] != 'G') {
+                    throw new RuntimeException("Invalid PNG returned from screenshot_window");
+                }
+            });
+            long deadline = System.currentTimeMillis() + 10000L;
+            while (!bridgeTestFuture.isDone() && System.currentTimeMillis() < deadline) {
+                bridge.drainUiTasks();
+                Thread.sleep(10);
+            }
+            bridgeTestFuture.get(1, java.util.concurrent.TimeUnit.SECONDS);
+            liveRpc.close();
+        } finally {
+            bridge.stop();
+        }
+
+        // Spawn real child JVM `AveeEditorApp --mcp --headless` to verify clean stdio framing & offscreen rendering
+        ProcessBuilder mcpPb = new ProcessBuilder(
+                javaBin, "-cp", cp, "com.daaw.avee.editor.AveeEditorApp",
+                "--mcp", "--headless", "--preset", "0", "--bridge-file", new File(mcpDir, "missing.json").getAbsolutePath());
+        mcpPb.redirectError(ProcessBuilder.Redirect.PIPE);
+        Process mcpProc = mcpPb.start();
+        try (java.io.BufferedWriter mOut = new java.io.BufferedWriter(new java.io.OutputStreamWriter(mcpProc.getOutputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+            mOut.write("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n");
+            mOut.write("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n");
+            mOut.write("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n");
+            mOut.write("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"get_scene\",\"arguments\":{}}}\n");
+            mOut.write("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"add_layer\",\"arguments\":{\"compIndex\":0,\"type\":\"Text\"}}}\n");
+            mOut.write("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"render_preview\",\"arguments\":{\"maxWidth\":320,\"advanceFrames\":2}}}\n");
+            mOut.flush();
+        }
+        String mcpStdout = new String(mcpProc.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        String mcpStderr = new String(mcpProc.getErrorStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        int mcpRc = mcpProc.waitFor();
+        if (mcpRc != 0) {
+            throw new AssertionError("Headless MCP subprocess failed rc=" + mcpRc + "\nSTDERR:\n" + mcpStderr);
+        }
+        String[] mcpLines = mcpStdout.trim().split("\\r?\\n");
+        if (mcpLines.length != 5) {
+            throw new AssertionError("Expected 5 JSON-RPC replies on stdout, got " + mcpLines.length + "\nSTDOUT:\n" + mcpStdout + "\nSTDERR:\n" + mcpStderr);
+        }
+        org.json.JSONObject previewReply = new org.json.JSONObject(mcpLines[4]);
+        org.json.JSONArray previewContent = previewReply.getJSONObject("result").getJSONArray("content");
+        byte[] headlessPng = java.util.Base64.getDecoder().decode(previewContent.getJSONObject(0).getString("data"));
+        if (headlessPng.length < 200 || (headlessPng[0] & 0xFF) != 0x89 || headlessPng[1] != 'P') {
+            throw new AssertionError("Headless MCP render_preview returned invalid PNG len=" + headlessPng.length);
+        }
+        System.out.println("MCP live bridge & headless stdio server verification OK (previewPngBytes=" + headlessPng.length + ")");
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);

@@ -14,6 +14,46 @@
   - **GPU Selector**: Switch between **Auto**, **Integrated GPU** (Intel VA-API on Linux / QuickSync on Windows), **External / Dedicated GPU** (NVIDIA NVENC), or **CPU Software** (`libx264` / `libx265`) — steering both OpenGL rendering and video encoding.
   - **Fast Async PBO Pipeline**: Offscreen FBO rendering + GPU-side Y-flip (`glBlitFramebuffer`) + double-buffered async Pixel Buffer Object (`GL_PIXEL_PACK_BUFFER`) DMA readback streamed directly to `ffmpeg`.
   - **Export Settings**: Presets (`1080p @60`, `1080p @30`, `720p @60`, `720p @30`, `1080x1920 Vertical`, `2160p 4K @60`, `Custom`), H.264 / HEVC codecs & profiles, bitrate, HQ blur toggle, hide app logo toggle, stereo AAC audio & start/end time range, 5s quick preview export, and live FPS/ETA progress monitor.
+- **Built-in GitHub Auto-Updater**: Checks GitHub Releases (`thanhcong2k7/AveeCraft`) asynchronously at startup (configurable via **Help -> Updates**, with opt-in auto-download), selects the matching platform installer/portable package, and installs/restarts cleanly.
+- **MCP Server (LLM Bridge & Headless Mode)**: Built-in Model Context Protocol (`--mcp`) stdio server allowing LLMs to inspect compositions/layers/properties, edit scenes with undo/redo, and capture canvas/window PNG screenshots.
+
+## MCP Server (LLM Integration)
+
+AveeCraft includes a zero-dependency **MCP (Model Context Protocol)** server (`--mcp`) supporting both **Read+Edit** and **Screenshots**:
+
+- **Live GUI Bridge (Manual Toggle)**: Start AveeCraft normally and enable **Tools -> Enable MCP Bridge** (off by default). The editor listens only on `127.0.0.1` with a per-session random bearer token written to `~/.aveecraft/mcp-bridge.json`, and you can toggle **Allow MCP Edits (Read+Edit)** on/off at any time.
+- **Headless Fallback**: When the GUI bridge is not enabled, `AveeCraft --mcp` automatically launches an offscreen OpenGL context so LLMs can still inspect/edit `.viz` templates and render PNG previews.
+- **Client Configuration**: In AveeCraft, click **Tools -> Copy MCP Client Config JSON**, or add an entry like this to your MCP client (e.g. Claude Desktop, Cursor, Antigravity):
+
+```json
+{
+  "mcpServers": {
+    "aveecraft": {
+      "command": "/path/to/AveeCraft",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+Or run directly from source during development:
+
+```bash
+./gradlew --quiet runMcp --args="--headless"
+```
+
+Useful flags for `--mcp`: `--read-only` (disable edits), `--live-only` (require running GUI bridge), `--headless` (skip live bridge), `--preset <0..17>`, `--project <file.viz|scene.json>`.
+
+### Available MCP Tools
+- **Inspect**: `get_state`, `get_scene`, `get_layer`, `get_property`, `list_catalog`
+- **Screenshots**: `render_preview` (visualizer canvas PNG), `screenshot_window` (full live editor UI PNG)
+- **Edit & Audio**: `load_preset`, `open_project`, `save_project`, `select_layer`, `add_composition`, `delete_composition`, `add_layer`, `duplicate_layer`, `delete_layer`, `move_layer`, `set_property`, `set_properties`, `set_audio`, `undo`, `redo`
+
+## Auto-Update Settings (`Help -> Updates`)
+
+- **Auto-check on startup**: **ON** by default (fetches the latest GitHub release in the background without blocking startup).
+- **Auto-download updates**: **OFF** by default (can be enabled under **Help -> Updates -> Auto-download updates**; preferences are saved to `~/.aveecraft/settings.json`).
+- **Release Naming (`v1.2.101.<suffix>`)**: AveeCraft tracks `1.2.101` as the original Android Avee Player base version and compares subsequent releases cleanly (`v1.2.101.<suffix>`).
 
 ## Download & Run Standalone Binaries
 

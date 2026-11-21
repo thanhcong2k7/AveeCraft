@@ -15,6 +15,10 @@ import com.daaw.avee.comp.Visualizer.Elements.Composition;
 import com.daaw.avee.comp.Visualizer.Elements.ElementsFactory;
 import com.daaw.avee.comp.Visualizer.Graphic.GraphicsUtils;
 import com.daaw.avee.comp.Visualizer.Graphic.RendererCore;
+import com.daaw.avee.mcp.AveeSceneService;
+import com.daaw.avee.mcp.McpBridgeServer;
+import com.daaw.avee.mcp.McpStdioServer;
+import com.daaw.avee.mcp.SceneHost;
 import imgui.ImFontAtlas;
 import imgui.ImFontConfig;
 import imgui.ImFontGlyphRangesBuilder;
@@ -46,7 +50,7 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.util.tinyfd.TinyFileDialogs;
 
-public class AveeEditorApp extends Application {
+public class AveeEditorApp extends Application implements SceneHost {
     private static final int[][] RESOLUTIONS = {
             {1280, 720},
             {1920, 1080},
@@ -93,6 +97,13 @@ public class AveeEditorApp extends Application {
     private final UpdateManager updateManager = new UpdateManager();
     private final ImBoolean autoCheckChk = new ImBoolean(true);
     private final ImBoolean autoDownloadChk = new ImBoolean(false);
+    private int activePresetIdx = 0;
+    private volatile boolean mcpReadOnly = false;
+    private final AveeSceneService mcpSceneService = new AveeSceneService(this);
+    private final McpBridgeServer mcpBridge = new McpBridgeServer(mcpSceneService);
+    private final ImBoolean mcpEnabledChk = new ImBoolean(false);
+    private final ImBoolean mcpAllowEditsChk = new ImBoolean(true);
+    private java.util.concurrent.CompletableFuture<BufferedImage> pendingWindowScreenshot = null;
     private int aboutIconTex = 0;
     private static final String REPO_URL = "https://github.com/thanhcong2k7/AveeCraft";
 
@@ -195,8 +206,30 @@ public class AveeEditorApp extends Application {
         float dtSec = (float) Math.max(0.001, Math.min(0.1, (nowNs - lastFrameNs) / 1_000_000_000.0));
         lastFrameNs = nowNs;
 
-        // Run main-thread callbacks (e.g. image decode results) and update audio engine clock
+        // Capture completed previous frame from front buffer if requested by screenshot_window
+        if (pendingWindowScreenshot != null) {
+            java.util.concurrent.CompletableFuture<BufferedImage> target = pendingWindowScreenshot;
+            pendingWindowScreenshot = null;
+            try {
+                long ctxWin = GLFW.glfwGetCurrentContext();
+                int[] fbW = new int[1];
+                int[] fbH = new int[1];
+                GLFW.glfwGetFramebufferSize(ctxWin, fbW, fbH);
+                int cw = Math.max(1, fbW[0]);
+                int ch = Math.max(1, fbH[0]);
+                GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, 0);
+                GL11.glReadBuffer(GL11.GL_FRONT);
+                Bitmap winBmp = GraphicsUtils.savePixels(0, 0, cw, ch, null);
+                GL11.glReadBuffer(GL11.GL_BACK);
+                target.complete(winBmp != null ? winBmp.getBufferedImage() : null);
+            } catch (Throwable t) {
+                target.completeExceptionally(t);
+            }
+        }
+
+        // Run main-thread callbacks (e.g. image decode results), drain MCP requests, and tick clock
         Looper.drainMainQueue();
+        mcpBridge.drainUiTasks();
         audioEngine.tickFrame(dtSec);
 
         // Render Avee scene into our offscreen preview FBO
@@ -220,6 +253,7 @@ public class AveeEditorApp extends Application {
 
     @Override
     protected void postRun() {
+        mcpBridge.stop();
         updateManager.shutdown();
         if (exportDialog.isExporting()) {
             exportDialog.cancelExport();
@@ -385,6 +419,29 @@ public class AveeEditorApp extends Application {
                 if (ImGui.menuItem("Export Current Frame PNG...")) {
                     File f = saveDialog("Save Preview Frame", "preview.png", new String[]{"*.png"}, "PNG Image (*.png)");
                     if (f != null) exportPreviewPng(ensureExt(f, ".png"));
+                }
+                ImGui.endMenu();
+            }
+
+            if (ImGui.beginMenu("Tools")) {
+                ImGui.text("MCP Server (LLM Integration)");
+                mcpEnabledChk.set(mcpBridge.isRunning());
+                if (ImGui.checkbox("Enable MCP Bridge", mcpEnabledChk)) {
+                    toggleMcpBridge(mcpEnabledChk.get());
+                }
+                mcpAllowEditsChk.set(!mcpReadOnly);
+                if (ImGui.checkbox("Allow MCP Edits (Read+Edit)", mcpAllowEditsChk)) {
+                    mcpReadOnly = !mcpAllowEditsChk.get();
+                }
+                if (mcpBridge.isRunning()) {
+                    ImGui.textDisabled("Bridge listening: 127.0.0.1:" + mcpBridge.getPort());
+                } else {
+                    ImGui.textDisabled("Bridge stopped (manual toggle)");
+                }
+                ImGui.separator();
+                if (ImGui.menuItem("Copy MCP Client Config JSON")) {
+                    ImGui.setClipboardText(buildMcpClientConfigJson());
+                    statusMessage = "Copied MCP client config JSON";
                 }
                 ImGui.endMenu();
             }
@@ -686,6 +743,7 @@ public class AveeEditorApp extends Application {
         try {
             currentScene = VizArchiveManager.loadPreset(idx);
             currentProjectFile = null;
+            activePresetIdx = idx;
             selectedCompIdx = 0;
             selectedElemIdx = currentScene.getEntryCount() > 0 && currentScene.getEntry(0).getEntryCount() > 0 ? 0 : -1;
             rendererCore.setThemeElements(currentScene);
@@ -701,6 +759,7 @@ public class AveeEditorApp extends Application {
         try {
             currentScene = VizArchiveManager.loadFile(f);
             currentProjectFile = f;
+            activePresetIdx = -1;
             selectedCompIdx = 0;
             selectedElemIdx = (currentScene.getEntryCount() > 0 && currentScene.getEntry(0).getEntryCount() > 0) ? 0 : -1;
             rendererCore.setThemeElements(currentScene);
@@ -1165,7 +1224,152 @@ public class AveeEditorApp extends Application {
         return new File(f.getParentFile(), f.getName() + ext);
     }
 
+    private void toggleMcpBridge(boolean enable) {
+        if (enable) {
+            try {
+                mcpBridge.start();
+                statusMessage = "MCP Bridge listening on 127.0.0.1:" + mcpBridge.getPort();
+            } catch (Exception e) {
+                statusMessage = "MCP Bridge failed: " + e.getMessage();
+            }
+        } else {
+            mcpBridge.stop();
+            statusMessage = "MCP Bridge stopped";
+        }
+    }
+
+    private static String buildMcpClientConfigJson() {
+        String appPath = System.getProperty("jpackage.app-path", "").trim();
+        org.json.JSONObject server = new org.json.JSONObject();
+        if (!appPath.isEmpty()) {
+            server.put("command", appPath);
+            server.put("args", new org.json.JSONArray(java.util.Arrays.asList("--mcp")));
+        } else {
+            String javaBin = new File(System.getProperty("java.home"), "bin/java").getAbsolutePath();
+            String cp = System.getProperty("java.class.path", "");
+            server.put("command", javaBin);
+            server.put("args", new org.json.JSONArray(java.util.Arrays.asList(
+                    "-cp", cp, AveeEditorApp.class.getName(), "--mcp")));
+        }
+        return new org.json.JSONObject()
+                .put("mcpServers", new org.json.JSONObject().put("aveecraft", server))
+                .toString(2);
+    }
+
+    @Override
+    public String getMode() { return "live"; }
+
+    @Override
+    public boolean isReadOnly() { return mcpReadOnly; }
+
+    @Override
+    public CustomScene getScene() { return currentScene; }
+
+    @Override
+    public void setScene(CustomScene scene, boolean rebuildElements) {
+        this.currentScene = scene;
+        if (rendererCore != null && scene != null) {
+            if (rebuildElements) rendererCore.setThemeElements(scene);
+            else rendererCore.setThemeCustomizationData(scene);
+        }
+    }
+
+    @Override
+    public void refreshLiveScene() {
+        if (rendererCore != null) {
+            currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
+        }
+    }
+
+    @Override
+    public RendererCore getRendererCore() { return rendererCore; }
+
+    @Override
+    public DesktopAudioEngine getAudioEngine() { return audioEngine; }
+
+    @Override
+    public int getSelectedCompIdx() { return selectedCompIdx; }
+
+    @Override
+    public int getSelectedElemIdx() { return selectedElemIdx; }
+
+    @Override
+    public void setSelection(int compIdx, int elemIdx, boolean triggerHighlight) {
+        this.selectedCompIdx = compIdx;
+        this.selectedElemIdx = elemIdx;
+        if (currentScene != null && currentScene.getEntryCount() > 0) {
+            selectedCompIdx = Math.max(0, Math.min(selectedCompIdx, currentScene.getEntryCount() - 1));
+            CustomComposition comp = currentScene.getEntry(selectedCompIdx);
+            int n = comp != null ? comp.getEntryCount() : 0;
+            if (selectedElemIdx >= n) selectedElemIdx = n - 1;
+        }
+        if (triggerHighlight && rendererCore != null) {
+            rendererCore.triggerHighlightByIndices(selectedCompIdx, selectedElemIdx);
+        }
+    }
+
+    @Override
+    public int getPreviewWidth() { return previewW; }
+
+    @Override
+    public int getPreviewHeight() { return previewH; }
+
+    @Override
+    public void setPreviewSize(int w, int h) {
+        previewW = Math.max(128, Math.min(3840, w));
+        previewH = Math.max(128, Math.min(2160, h));
+    }
+
+    @Override
+    public File getProjectFile() { return currentProjectFile; }
+
+    @Override
+    public void setProjectFile(File file) { this.currentProjectFile = file; }
+
+    @Override
+    public int getActivePresetIndex() { return activePresetIdx; }
+
+    @Override
+    public void setActivePresetIndex(int idx) { this.activePresetIdx = idx; }
+
+    @Override
+    public void setStatusMessage(String msg) {
+        if (msg != null) this.statusMessage = msg;
+    }
+
+    @Override
+    public BufferedImage capturePreviewImage(int advanceFrames, long seekMs) {
+        if (seekMs >= 0L) {
+            audioEngine.stepOfflineFrame(seekMs, 0.016f);
+        }
+        ensurePreviewFbo(previewW, previewH);
+        int steps = Math.max(1, Math.min(120, advanceFrames));
+        for (int i = 0; i < steps; i++) {
+            Looper.drainMainQueue();
+            audioEngine.tickFrame(0.016f);
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, previewFbo);
+            GLES20.setRedirectFramebuffer0(previewFbo);
+            rendererCore.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+        }
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, previewFbo);
+        Bitmap bmp = GraphicsUtils.savePixels(0, 0, previewW, previewH, null);
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+        return bmp != null ? bmp.getBufferedImage() : null;
+    }
+
+    @Override
+    public void captureWindowImageAsync(java.util.concurrent.CompletableFuture<BufferedImage> future) {
+        this.pendingWindowScreenshot = future;
+    }
+
     public static void main(String[] args) throws Exception {
+        if (args != null && args.length >= 1 && "--mcp".equals(args[0])) {
+            String[] mcpArgs = java.util.Arrays.copyOfRange(args, 1, args.length);
+            McpStdioServer.main(mcpArgs);
+            return;
+        }
         if (args != null && args.length >= 2 && "--export".equals(args[0])) {
             ExportWorker.main(new String[]{args[1]});
             return;
