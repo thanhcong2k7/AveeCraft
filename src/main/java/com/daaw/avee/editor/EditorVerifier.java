@@ -713,6 +713,84 @@ public class EditorVerifier {
         }
         System.out.println("Cross-composition move & delete-comp layer merge OK");
 
+        // Verify UpdateManager version comparator, platform asset matching, settings defaults, and mock GitHub download
+        if (UpdateManager.compareVersions("v1.2.101", "v1.2.101a01") >= 0
+                || UpdateManager.compareVersions("v1.2.101a01", "v1.2.101a03") >= 0
+                || UpdateManager.compareVersions("v1.2.101a03", "v1.2.101.a04") >= 0
+                || UpdateManager.compareVersions("v1.2.101.a04", "v1.2.101.b01") >= 0
+                || UpdateManager.compareVersions("v1.2.101.b01", "v1.2.101.1") >= 0
+                || UpdateManager.compareVersions("v1.2.101.1", "v1.2.101.2") >= 0
+                || UpdateManager.compareVersions("v1.2.101", "v1.2.101.abc") >= 0
+                || UpdateManager.compareVersions("v1.2.101.abc", "v1.2.101.abd") >= 0
+                || UpdateManager.compareVersions("v1.2.101.a03", "1.2.101.a03") != 0) {
+            throw new AssertionError("UpdateManager.compareVersions ordering mismatch");
+        }
+        java.util.List<UpdateManager.ReleaseAsset> mockAssets = java.util.Arrays.asList(
+                new UpdateManager.ReleaseAsset("AveeCraft-windows-x64-setup.exe", "http://127.0.0.1/setup.exe", 10),
+                new UpdateManager.ReleaseAsset("AveeCraft-windows-x64-standalone.zip", "http://127.0.0.1/win.zip", 10),
+                new UpdateManager.ReleaseAsset("AveeCraft-linux-amd64.deb", "http://127.0.0.1/app.deb", 10),
+                new UpdateManager.ReleaseAsset("AveeCraft-linux-x64-standalone.tar.gz", "http://127.0.0.1/lin.tar.gz", 10)
+        );
+        if (!"AveeCraft-windows-x64-setup.exe".equals(UpdateManager.selectAssetForPlatform(mockAssets, UpdateManager.PackageKind.WINDOWS_SETUP).name)
+                || !"AveeCraft-windows-x64-standalone.zip".equals(UpdateManager.selectAssetForPlatform(mockAssets, UpdateManager.PackageKind.WINDOWS_PORTABLE).name)
+                || !"AveeCraft-linux-amd64.deb".equals(UpdateManager.selectAssetForPlatform(mockAssets, UpdateManager.PackageKind.LINUX_DEB).name)
+                || !"AveeCraft-linux-x64-standalone.tar.gz".equals(UpdateManager.selectAssetForPlatform(mockAssets, UpdateManager.PackageKind.LINUX_PORTABLE).name)) {
+            throw new AssertionError("UpdateManager asset selection mismatch");
+        }
+        File updCfgDir = java.nio.file.Files.createTempDirectory("avee_upd_test_").toFile();
+        final byte[] fakePayload = "AVEECRAFT_UPDATE_BYTES_1234567890".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        try (java.net.ServerSocket ss = new java.net.ServerSocket(0, 10, java.net.InetAddress.getLoopbackAddress())) {
+            int port = ss.getLocalPort();
+            Thread httpT = new Thread(() -> {
+                for (int req = 0; req < 2; req++) {
+                    try (java.net.Socket s = ss.accept()) {
+                        java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(s.getInputStream()));
+                        String reqLine = br.readLine();
+                        String line;
+                        while ((line = br.readLine()) != null && !line.isEmpty()) {}
+                        java.io.OutputStream os = s.getOutputStream();
+                        if (reqLine != null && reqLine.contains("/releases")) {
+                            String json = "[{\"tag_name\":\"v1.2.101.z99\",\"name\":\"v1.2.101.z99\",\"body\":\"Test release\",\"html_url\":\"https://example.com\",\"prerelease\":true,\"assets\":["
+                                    + "{\"name\":\"AveeCraft-linux-x64-standalone.tar.gz\",\"browser_download_url\":\"http://127.0.0.1:" + port + "/pkg.tar.gz\",\"size\":" + fakePayload.length + "},"
+                                    + "{\"name\":\"AveeCraft-windows-x64-setup.exe\",\"browser_download_url\":\"http://127.0.0.1:" + port + "/setup.exe\",\"size\":" + fakePayload.length + "}"
+                                    + "]}]";
+                            byte[] jb = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                            os.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + jb.length + "\r\nConnection: close\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                            os.write(jb);
+                        } else {
+                            os.write(("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: " + fakePayload.length + "\r\nConnection: close\r\n\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                            os.write(fakePayload);
+                        }
+                        os.flush();
+                    } catch (Throwable ignored) {}
+                }
+            }, "MockGitHubUpdateServer");
+            httpT.setDaemon(true);
+            httpT.start();
+
+            UpdateManager um = new UpdateManager(updCfgDir, "http://127.0.0.1:" + port, "v1.2.101.a03");
+            if (!um.getSettings().autoCheckUpdates || um.getSettings().autoDownloadUpdates) {
+                throw new AssertionError("UpdateManager default settings mismatch");
+            }
+            um.checkForUpdatesBlocking(false);
+            if (um.getState() != UpdateManager.State.AVAILABLE || um.getLatestRelease() == null
+                    || !"v1.2.101.z99".equals(um.getLatestRelease().tagName)) {
+                throw new AssertionError("UpdateManager check failed: state=" + um.getState() + " status=" + um.getStatusText());
+            }
+            um.downloadUpdateBlocking();
+            if (um.getState() != UpdateManager.State.READY || um.getDownloadedFile() == null
+                    || um.getDownloadedFile().length() != fakePayload.length) {
+                throw new AssertionError("UpdateManager download failed: state=" + um.getState() + " status=" + um.getStatusText());
+            }
+            um.getSettings().autoDownloadUpdates = true;
+            um.saveSettings();
+            UpdateManager umReloaded = new UpdateManager(updCfgDir, "http://127.0.0.1:" + port, "v1.2.101.a03");
+            if (!umReloaded.getSettings().autoDownloadUpdates) {
+                throw new AssertionError("UpdateManager settings persistence failed");
+            }
+        }
+        System.out.println("UpdateManager verification OK (currentVersion=" + UpdateManager.getCurrentVersion() + ")");
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);

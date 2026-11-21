@@ -89,6 +89,10 @@ public class AveeEditorApp extends Application {
     private int frameCounter = 0;
     private final List<Object> listenerHolders = new ArrayList<>();
     private boolean aboutOpen = false;
+    private boolean updateDialogOpen = false;
+    private final UpdateManager updateManager = new UpdateManager();
+    private final ImBoolean autoCheckChk = new ImBoolean(true);
+    private final ImBoolean autoDownloadChk = new ImBoolean(false);
     private int aboutIconTex = 0;
     private static final String REPO_URL = "https://github.com/thanhcong2k7/AveeCraft";
 
@@ -143,6 +147,9 @@ public class AveeEditorApp extends Application {
         rendererCore.onSurfaceChanged(null, previewW, previewH);
 
         loadBuiltInPreset(0);
+        if (updateManager.getSettings().autoCheckUpdates) {
+            updateManager.checkForUpdatesAsync(false);
+        }
     }
 
     private void applyWindowIcon() {
@@ -213,6 +220,7 @@ public class AveeEditorApp extends Application {
 
     @Override
     protected void postRun() {
+        updateManager.shutdown();
         if (exportDialog.isExporting()) {
             exportDialog.cancelExport();
         }
@@ -307,6 +315,7 @@ public class AveeEditorApp extends Application {
 
         exportDialog.render(currentScene, rendererCore, audioEngine, previewW, previewH);
         renderAboutDialog();
+        renderUpdateDialog();
     }
 
     private void renderMainMenuBar() {
@@ -381,10 +390,47 @@ public class AveeEditorApp extends Application {
             }
 
             if (ImGui.beginMenu("Help")) {
+                if (ImGui.beginMenu("Updates")) {
+                    if (ImGui.menuItem("Check for Updates...")) {
+                        updateDialogOpen = true;
+                        updateManager.checkForUpdatesAsync(true);
+                    }
+                    ImGui.separator();
+                    UpdateManager.Settings us = updateManager.getSettings();
+                    autoCheckChk.set(us.autoCheckUpdates);
+                    if (ImGui.checkbox("Auto-check on startup", autoCheckChk)) {
+                        us.autoCheckUpdates = autoCheckChk.get();
+                        updateManager.saveSettings();
+                    }
+                    autoDownloadChk.set(us.autoDownloadUpdates);
+                    if (ImGui.checkbox("Auto-download updates", autoDownloadChk)) {
+                        us.autoDownloadUpdates = autoDownloadChk.get();
+                        updateManager.saveSettings();
+                    }
+                    ImGui.separator();
+                    if (ImGui.menuItem("Open Updates Folder")) {
+                        UpdateManager.openFolder(updateManager.getUpdatesDir());
+                    }
+                    ImGui.endMenu();
+                }
                 if (ImGui.menuItem("About AveeCraft...")) {
                     aboutOpen = true;
                 }
                 ImGui.endMenu();
+            }
+
+            UpdateManager.State uState = updateManager.getState();
+            if ((uState == UpdateManager.State.AVAILABLE || uState == UpdateManager.State.READY)
+                    && updateManager.getLatestRelease() != null) {
+                ImGui.sameLine();
+                String badge = (uState == UpdateManager.State.READY)
+                        ? ("Update Ready: " + updateManager.getLatestRelease().tagName)
+                        : ("Update Available: " + updateManager.getLatestRelease().tagName);
+                ImGui.pushStyleColor(ImGuiCol.Button, 0.16f, 0.45f, 0.24f, 1.0f);
+                if (ImGui.smallButton(badge)) {
+                    updateDialogOpen = true;
+                }
+                ImGui.popStyleColor();
             }
 
             ImGui.sameLine(ImGui.getWindowWidth() - 420f);
@@ -946,7 +992,7 @@ public class AveeEditorApp extends Application {
                 ImGui.sameLine();
             }
             ImGui.beginGroup();
-            ImGui.text("AveeCraft v1.0.0");
+            ImGui.text("AveeCraft " + UpdateManager.getCurrentVersion());
             ImGui.textDisabled("Desktop Audio Visualizer Editor & GPU Video Exporter");
             ImGui.endGroup();
             ImGui.separator();
@@ -965,6 +1011,98 @@ public class AveeEditorApp extends Application {
             }
             ImGui.sameLine();
             if (ImGui.button("Close", 100f, 0f)) {
+                ImGui.closeCurrentPopup();
+            }
+            ImGui.endPopup();
+        }
+    }
+
+    private void renderUpdateDialog() {
+        if (updateDialogOpen) {
+            ImGui.openPopup("AveeCraft Updates##Modal");
+            updateDialogOpen = false;
+        }
+        ImGuiViewport vp = ImGui.getMainViewport();
+        ImGui.setNextWindowPos(vp.getCenterX(), vp.getCenterY(), imgui.flag.ImGuiCond.Appearing, 0.5f, 0.5f);
+        ImGui.setNextWindowSize(520f, 0f, imgui.flag.ImGuiCond.Always);
+        if (ImGui.beginPopupModal("AveeCraft Updates##Modal", ImGuiWindowFlags.NoResize)) {
+            ImGui.text("Current version: " + updateManager.getEffectiveCurrentVersion());
+            UpdateManager.State st = updateManager.getState();
+            String stText = updateManager.getStatusText();
+            if (stText != null && !stText.isEmpty()) {
+                if (st == UpdateManager.State.ERROR) {
+                    ImGui.textColored(1.0f, 0.45f, 0.45f, 1.0f, stText);
+                } else if (st == UpdateManager.State.AVAILABLE || st == UpdateManager.State.READY) {
+                    ImGui.textColored(0.45f, 0.92f, 0.55f, 1.0f, stText);
+                } else {
+                    ImGui.textDisabled(stText);
+                }
+            }
+            ImGui.separator();
+
+            UpdateManager.ReleaseInfo rel = updateManager.getLatestRelease();
+            if (rel != null) {
+                ImGui.text("Latest release: " + rel.tagName + (rel.prerelease ? " (pre-release)" : ""));
+                UpdateManager.ReleaseAsset asset = updateManager.getSelectedAsset();
+                if (asset != null) {
+                    String sizeMb = asset.size > 0
+                            ? String.format(java.util.Locale.ROOT, " (%.1f MB)", asset.size / (1024.0 * 1024.0))
+                            : "";
+                    ImGui.textDisabled("Package: " + asset.name + sizeMb);
+                }
+                if (rel.body != null && !rel.body.trim().isEmpty()) {
+                    ImGui.beginChild("##RelNotes", 0f, 150f, true);
+                    ImGui.textWrapped(rel.body.trim());
+                    ImGui.endChild();
+                }
+            }
+
+            if (st == UpdateManager.State.DOWNLOADING) {
+                float prog = updateManager.getDownloadProgress();
+                long dlKb = updateManager.getDownloadedBytes() / 1024L;
+                long totKb = updateManager.getTotalBytes() / 1024L;
+                String overlay = totKb > 0 ? (dlKb + " / " + totKb + " KB") : (dlKb + " KB");
+                ImGui.progressBar(prog, -1f, 0f, overlay);
+            }
+
+            ImGui.spacing();
+            if (st != UpdateManager.State.CHECKING && st != UpdateManager.State.DOWNLOADING) {
+                if (ImGui.button("Check Again", 110f, 0f)) {
+                    updateManager.checkForUpdatesAsync(true);
+                }
+                ImGui.sameLine();
+            }
+            if (st == UpdateManager.State.AVAILABLE && updateManager.getSelectedAsset() != null) {
+                if (ImGui.button("Download Update", 135f, 0f)) {
+                    updateManager.downloadUpdateAsync();
+                }
+                ImGui.sameLine();
+                if (ImGui.button("Skip Version", 105f, 0f)) {
+                    updateManager.skipLatestVersion();
+                }
+                ImGui.sameLine();
+            } else if (st == UpdateManager.State.READY) {
+                if (ImGui.button("Install & Restart", 135f, 0f)) {
+                    try {
+                        boolean shouldExit = updateManager.applyDownloadedUpdate();
+                        statusMessage = updateManager.getStatusText();
+                        if (shouldExit) {
+                            long win = GLFW.glfwGetCurrentContext();
+                            if (win != 0L) GLFW.glfwSetWindowShouldClose(win, true);
+                        }
+                    } catch (Exception ex) {
+                        statusMessage = "Install failed: " + ex.getMessage();
+                    }
+                }
+                ImGui.sameLine();
+            }
+            if (rel != null && rel.htmlUrl != null && !rel.htmlUrl.isEmpty()) {
+                if (ImGui.button("Release Page", 110f, 0f)) {
+                    openBrowserUrl(rel.htmlUrl);
+                }
+                ImGui.sameLine();
+            }
+            if (ImGui.button("Close", 80f, 0f)) {
                 ImGui.closeCurrentPopup();
             }
             ImGui.endPopup();

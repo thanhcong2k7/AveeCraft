@@ -128,6 +128,49 @@ tasks.register('generateWindowsIcon') {
     }
 }
 
+tasks.register('generateVersionProperties') {
+    def outDir = layout.buildDirectory.dir('generated-resources')
+    def propFile = layout.buildDirectory.file('generated-resources/aveecraft-version.properties')
+    def explicitVer = (findProperty('appVersion') ?: '').toString().trim()
+    outputs.file(propFile)
+    doLast {
+        String tagVer = explicitVer
+        if (tagVer.isEmpty()) {
+            try {
+                def proc = new ProcessBuilder('git', 'describe', '--tags', '--abbrev=0')
+                        .directory(projectDir)
+                        .redirectErrorStream(true)
+                        .start()
+                def out = proc.inputStream.getText('UTF-8').trim()
+                if (proc.waitFor() == 0 && !out.isEmpty()) {
+                    tagVer = out
+                }
+            } catch (Throwable ignored) {}
+        }
+        if (tagVer.isEmpty()) {
+            tagVer = 'v1.2.101.dev'
+        }
+        def m = (tagVer =~ /(\d+\.\d+\.\d+)/)
+        String numVer = m.find() ? m.group(1) : '1.0.0'
+        def dir = outDir.get().asFile
+        dir.mkdirs()
+        def f = propFile.get().asFile
+        f.setText("version=${tagVer}\nnumericVersion=${numVer}\nrepo=thanhcong2k7/AveeCraft\n", 'UTF-8')
+    }
+}
+
+sourceSets {
+    main {
+        resources {
+            srcDir layout.buildDirectory.dir('generated-resources')
+        }
+    }
+}
+
+tasks.named('processResources') {
+    dependsOn tasks.named('generateVersionProperties')
+}
+
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
