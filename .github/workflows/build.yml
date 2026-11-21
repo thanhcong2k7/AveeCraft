@@ -51,12 +51,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Compile and stage dependencies
-        run: |
-          APP_VER_ARG=""
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            APP_VER_ARG="-PappVersion=${{ github.ref_name }}"
-          fi
-          ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} ${APP_VER_ARG} compileJava stagePackageInput generateWindowsIcon
+        run: ./gradlew --no-daemon -PtargetOs=${{ matrix.target_os }} ${{ github.ref_type == 'tag' && format('"-PappVersion={0}"', github.ref_name) || '' }} compileJava stagePackageInput generateWindowsIcon
 
       - name: Download & bundle FFmpeg & FFprobe
         shell: bash

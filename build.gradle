@@ -132,7 +132,9 @@ tasks.register('generateVersionProperties') {
     def outDir = layout.buildDirectory.dir('generated-resources')
     def propFile = layout.buildDirectory.file('generated-resources/aveecraft-version.properties')
     def explicitVer = (findProperty('appVersion') ?: '').toString().trim()
+    inputs.property('appVersion', explicitVer)
     outputs.file(propFile)
+    outputs.upToDateWhen { false }
     doLast {
         String tagVer = explicitVer
         if (tagVer.isEmpty()) {
