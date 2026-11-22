@@ -79,6 +79,9 @@ public class ExportWorker {
         int fboRender = GL30.glGenFramebuffers();
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fboRender);
         GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D, texRender, 0);
+        GL11.glViewport(0, 0, w, h);
+        GL11.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        GL11.glClear(GL11.GL_COLOR_BUFFER_BIT | GL11.GL_DEPTH_BUFFER_BIT);
 
         int texFlip = GL11.glGenTextures();
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, texFlip);
@@ -146,9 +149,7 @@ public class ExportWorker {
         for (int warm = 0; warm < 90; warm++) {
             Looper.drainMainQueue();
             audio.stepOfflineFrame(startMs, dtSec);
-            GLES20.setRedirectFramebuffer0(fboRender);
-            rc.onDrawFrame(null);
-            GLES20.setRedirectFramebuffer0(0);
+            drawToFbo(rc, fboRender);
             if (warm >= 3 && rc.getFrameStats().getFrameResourcesLoadingCount() == 0) {
                 break;
             }
@@ -193,9 +194,7 @@ public class ExportWorker {
                 long posMs = startMs + Math.round((f * 1000.0) / fps);
                 audio.stepOfflineFrame(posMs, dtSec);
 
-                GLES20.setRedirectFramebuffer0(fboRender);
-                rc.onDrawFrame(null);
-                GLES20.setRedirectFramebuffer0(0);
+                drawToFbo(rc, fboRender);
 
                 // GPU-side vertical flip blit into fboFlip
                 GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, fboRender);
@@ -409,5 +408,14 @@ public class ExportWorker {
         cmd.add("+faststart");
         cmd.add(outFile.getAbsolutePath());
         return cmd;
+    }
+
+    /** Bind {@code fboRender} before {@code onDrawFrame} so {@code RendererCore}'s initial clear targets it instead of FBO 0. */
+    private static void drawToFbo(RendererCore rc, int fboRender) {
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fboRender);
+        GLES20.setRedirectFramebuffer0(fboRender);
+        rc.onDrawFrame(null);
+        GLES20.setRedirectFramebuffer0(0);
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
     }
 }
