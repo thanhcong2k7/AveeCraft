@@ -27,6 +27,10 @@ public interface InternalVisualizationDataProvider {
 
     AudioFrameData onRequestSoundVisualizationData(int i);
 
+    default AudioFrameData onRequestSoundVisualizationData(int i, int offsetMs) {
+        return onRequestSoundVisualizationData(i);
+    }
+
     TrackDurationInfo onRequestTrackDurationInfo();
 
     boolean onRequestUseHighQualityBlur();

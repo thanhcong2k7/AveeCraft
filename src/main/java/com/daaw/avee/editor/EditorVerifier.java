@@ -931,6 +931,9 @@ public class EditorVerifier {
         // Part 6 verification: Shape corner roundness (RoundedRect + SidedPolygon) on Image & Bars
         verifyPart6ShapeRoundness(rc, audio, w, h, fbo);
 
+        // Part 7 verification: AE AudioProviderAE, AESpectrum (linear freq + L/R + no-AGC) & AEWaveform
+        verifyPart7AeAudioProvider(rc, audio, fbo);
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);
@@ -1622,5 +1625,179 @@ public class EditorVerifier {
             throw new AssertionError("Part 6 RoundedRect render check failed: " + e.getMessage(), e);
         }
         System.out.println("Part 6 verification OK (RoundedRect + SidedPolygon roundness property, geometry & render clipping OK)");
+    }
+
+    private static void verifyPart7AeAudioProvider(RendererCore rc, DesktopAudioEngine mainAudio, int fbo) throws Exception {
+        // 1) Element & Factory registration + familiar property parity
+        com.daaw.avee.comp.Visualizer.Elements.Base.Element aeEl =
+                com.daaw.avee.comp.Visualizer.Elements.ElementsFactory.create("AudioProviderAE", "", null);
+        if (!(aeEl instanceof com.daaw.avee.comp.Visualizer.Elements.AeAudioDataProviderElement)) {
+            throw new AssertionError("Expected AeAudioDataProviderElement for AudioProviderAE");
+        }
+        if (!com.daaw.avee.comp.Visualizer.Elements.ElementsFactory.getAddableTypeNames().contains("AudioProviderAE")) {
+            throw new AssertionError("AudioProviderAE missing from ElementsFactory.getAddableTypeNames()");
+        }
+        com.daaw.avee.comp.Visualizer.Elements.Segment.ISegmentDataProvider aeSpecP =
+                com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentDataProviderFactory.create("AESpectrum", null);
+        com.daaw.avee.comp.Visualizer.Elements.Segment.ISegmentDataProvider aeWaveP =
+                com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentDataProviderFactory.create("AEWaveform", null);
+        if (!(aeSpecP instanceof com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAeSpectrumData)
+                || !(aeWaveP instanceof com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAeWaveformData)) {
+            throw new AssertionError("SegmentDataProviderFactory failed to create AESpectrum / AEWaveform");
+        }
+
+        CustomPropertiesList aeProps = new CustomPropertiesList(0, new org.json.JSONObject(), null);
+        aeSpecP.onReadCustomization(aeProps);
+        String[] expectedSpecKeys = {"fftSize", "sampleOutCount", "lowerHz", "higherHz", "hzLinearFactor",
+                "mirrorSamples", "smooth", "outputMultiplier", "audioDurationMs", "audioOffsetMs", "channelMode", "agcNormalized"};
+        for (String k : expectedSpecKeys) {
+            if (aeProps.getPropertyType(k) == null) {
+                throw new AssertionError("AESpectrum missing property key: " + k);
+            }
+        }
+        CustomPropertiesList waveProps = new CustomPropertiesList(0, new org.json.JSONObject(), null);
+        aeWaveP.onReadCustomization(waveProps);
+        if (waveProps.getPropertyType("sampleOutCountPower") == null || waveProps.getPropertyType("waveformMode") == null
+                || waveProps.getPropertyType("audioDurationMs") == null) {
+            throw new AssertionError("AEWaveform missing expected property keys");
+        }
+
+        // 2) Stereo WAV fixture: t<1.5s L=440Hz(0.8), R=1200Hz(0.4); t>=1.5s L=440Hz(0.2) (4x quieter to verify no-AGC)
+        int sr = 44100;
+        int totalSamples = (int) (sr * 2.5);
+        byte[] pcmBytes = new byte[totalSamples * 4];
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(pcmBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (int i = 0; i < totalSamples; i++) {
+            double sec = i / (double) sr;
+            double ampL = sec < 1.5 ? 0.8 : 0.2;
+            short l = (short) Math.round(ampL * Math.sin(2.0 * Math.PI * 440.0 * sec) * 32000.0);
+            short r = (short) Math.round(0.4 * Math.sin(2.0 * Math.PI * 1200.0 * sec) * 32000.0);
+            bb.putShort(l);
+            bb.putShort(r);
+        }
+        File tmpWav = File.createTempFile("avee_part7_stereo_", ".wav");
+        tmpWav.deleteOnExit();
+        try (javax.sound.sampled.AudioInputStream ais = new javax.sound.sampled.AudioInputStream(
+                new java.io.ByteArrayInputStream(pcmBytes),
+                new javax.sound.sampled.AudioFormat(sr, 16, 2, true, false),
+                totalSamples)) {
+            javax.sound.sampled.AudioSystem.write(ais, javax.sound.sampled.AudioFileFormat.Type.WAVE, tmpWav);
+        }
+
+        DesktopAudioEngine eng = new DesktopAudioEngine(false);
+        if (!eng.loadAudioFile(tmpWav)) {
+            throw new AssertionError("Failed to load stereo WAV in Part 7 test");
+        }
+        eng.setSyntheticBeat(false);
+
+        com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAeSpectrumData spec =
+                new com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAeSpectrumData()
+                        .setSampleOutCount(101)
+                        .setFreqRange(0.0f, 2000.0f)
+                        .setAudioDurationMs(60);
+        com.daaw.avee.comp.Visualizer.Graphic.RenderState fakeRs =
+                new com.daaw.avee.comp.Visualizer.Graphic.RenderState(eng) {
+                    @Override public float getFrameTimeF() { return 0.016f; }
+                    @Override public boolean getMultiThread() { return false; }
+                };
+
+        // Left channel peak near 440 Hz -> bin 22 (of 0..100 for 0..2000 Hz)
+        spec.setChannelMode("Left");
+        eng.stepOfflineFrame(600L, 0.016f);
+        spec.process(fakeRs, eng);
+        float[] barsLeftLoud = spec.getFrameValues(0, 0).clone();
+        int peakLeftBin = 0;
+        for (int i = 1; i < barsLeftLoud.length; i++) {
+            if (barsLeftLoud[i] > barsLeftLoud[peakLeftBin]) peakLeftBin = i;
+        }
+        if (Math.abs(peakLeftBin - 22) > 2 || barsLeftLoud[peakLeftBin] < 10.0f) {
+            throw new AssertionError("AE Left channel 440Hz peak mismatch: bin=" + peakLeftBin + " val=" + barsLeftLoud[peakLeftBin]);
+        }
+
+        // Right channel peak near 1200 Hz -> bin 60
+        spec.setChannelMode("Right");
+        eng.stepOfflineFrame(600L, 0.016f);
+        spec.process(fakeRs, eng);
+        float[] barsRight = spec.getFrameValues(0, 0).clone();
+        int peakRightBin = 0;
+        for (int i = 1; i < barsRight.length; i++) {
+            if (barsRight[i] > barsRight[peakRightBin]) peakRightBin = i;
+        }
+        if (Math.abs(peakRightBin - 60) > 2 || barsRight[peakRightBin] < 5.0f) {
+            throw new AssertionError("AE Right channel 1200Hz peak mismatch: bin=" + peakRightBin + " val=" + barsRight[peakRightBin]);
+        }
+
+        // No-AGC linearity: Left at 2000ms (0.2 amp) must be ~0.25x Left at 600ms (0.8 amp)
+        spec.setChannelMode("Left");
+        eng.stepOfflineFrame(2000L, 0.016f);
+        spec.process(fakeRs, eng);
+        float[] barsLeftQuiet = spec.getFrameValues(0, 0).clone();
+        float loudPeak = barsLeftLoud[peakLeftBin];
+        float quietPeak = barsLeftQuiet[peakLeftBin];
+        float dynRatio = loudPeak / Math.max(1e-4f, quietPeak);
+        if (dynRatio < 3.2f || dynRatio > 4.8f) {
+            throw new AssertionError("AESpectrum no-AGC ratio expected ~4.0x, got " + dynRatio
+                    + " (loud=" + loudPeak + " quiet=" + quietPeak + ")");
+        }
+
+        // Pause freeze check on AESpectrum & AEWaveform
+        com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAeWaveformData wave =
+                new com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAeWaveformData()
+                        .setSampleOutCountPower(6)
+                        .setWaveformMode("SignedSample");
+        wave.process(fakeRs, eng);
+        float[] waveActive = wave.getFrameValues(0, 0).clone();
+        boolean hasNeg = false;
+        boolean hasPos = false;
+        for (float v : waveActive) {
+            if (v < -0.5f) hasNeg = true;
+            if (v > 0.5f) hasPos = true;
+        }
+        if (!hasNeg || !hasPos) {
+            throw new AssertionError("AEWaveform SignedSample should capture zero-centered oscillations");
+        }
+        eng.stepOfflineFrame(600L, 0.016f);
+        spec.process(fakeRs, eng);
+        eng.setPlaying(false);
+        // After pause without seek, bars should remain frozen across process calls
+        float[] prevBars = spec.getFrameValues(0, 0).clone();
+        for (int f = 0; f < 5; f++) {
+            eng.tickFrame(0.016f);
+            spec.process(fakeRs, eng);
+        }
+        float[] frozenBars = spec.getFrameValues(0, 0);
+        if (Math.abs(frozenBars[peakLeftBin] - prevBars[peakLeftBin]) > 1e-5f) {
+            throw new AssertionError("AESpectrum failed to freeze on pause");
+        }
+        eng.shutdown();
+
+        // 3) Scene render check with AudioProvider + AudioProviderAE driving Bars at audioProviderIndex=2
+        CustomScene scene = CustomScene.Create();
+        CustomComposition comp0 = scene.createDataEntry();
+        comp0.putChildTypeValue("Composition");
+        CustomPropertiesList ap1 = comp0.createDataEntry();
+        ap1.putChildTypeValue("AudioProvider");
+        CustomPropertiesList ap2 = comp0.createDataEntry();
+        ap2.putChildTypeValue("AudioProviderAE");
+        CustomPropertiesList bars = comp0.createDataEntry();
+        bars.putChildTypeValue("Bars");
+        bars.putPropertyIntValue("audioProviderIndex", 2);
+
+        rc.setThemeElements(scene);
+        for (int f = 0; f < 3; f++) {
+            Looper.drainMainQueue();
+            mainAudio.tickFrame(0.016f);
+            GLES20.setRedirectFramebuffer0(fbo);
+            rc.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+        }
+        CustomScene readBack = VizArchiveManager.readLiveScene(scene, rc, null);
+        String ap2Type = readBack.getEntry(0).getData(1).getTypeName("");
+        String ap2Sub = readBack.getEntry(0).getData(1).getChild("sampleProvider").getTypeName("");
+        if (!"AudioProviderAE".equals(ap2Type) || !"AESpectrum".equals(ap2Sub)) {
+            throw new AssertionError("AudioProviderAE scene round-trip mismatch: type=" + ap2Type + " sub=" + ap2Sub);
+        }
+        System.out.println("Part 7 verification OK (AudioProviderAE + AESpectrum/AEWaveform ratio="
+                + String.format(java.util.Locale.US, "%.2fx", dynRatio) + ", L/R peak=" + peakLeftBin + "/" + peakRightBin + ")");
     }
 }

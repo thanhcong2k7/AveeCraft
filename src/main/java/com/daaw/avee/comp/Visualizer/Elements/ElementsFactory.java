@@ -21,6 +21,7 @@ public class ElementsFactory {
         elementTypes.put("Image", ImageElement.class);
         elementTypes.put("Video", VideoElement.class);
         elementTypes.put("AudioProvider", AudioDataProviderElement.class);
+        elementTypes.put("AudioProviderAE", AeAudioDataProviderElement.class);
         elementTypes.put("BlurEffect", BlurStackEffectElement.class);
         elementTypes.put("RgbSplitEffect", RgbSplitEffectElement.class);
         elementTypes.put("MotionBlurEffect", MotionBlurEffectElement.class);

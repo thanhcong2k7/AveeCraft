@@ -274,12 +274,18 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
 
     @Override
     public AudioFrameData onRequestSoundVisualizationData(int outCount) {
+        return onRequestSoundVisualizationData(outCount, 0);
+    }
+
+    @Override
+    public AudioFrameData onRequestSoundVisualizationData(int outCount, int offsetMs) {
         int count = Math.max(256, outCount);
         frameData.init(SAMPLE_RATE, CHANNELS, count, count, true);
         short[] dst = frameData.pcmBuffer;
         short[] src = this.pcmSamples;
         long frames = this.totalFrames;
-        long posFrame = this.playheadFrame;
+        long offsetFrames = (offsetMs * (long) SAMPLE_RATE) / 1000L;
+        long posFrame = frames > 0 ? Math.max(0L, Math.min(frames - 1, this.playheadFrame + offsetFrames)) : 0L;
 
         double rmsAccum = 0.0;
         short minS = Short.MAX_VALUE;
@@ -299,7 +305,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                 if (abs > maxS) maxS = abs;
             }
         } else if (syntheticBeat) {
-            double t = totalTimeSec;
+            double t = totalTimeSec + (offsetMs / 1000.0);
             double beatEnv = Math.pow(Math.max(0.0, Math.sin(t * Math.PI * 2.2)), 6.0) * 0.75 + 0.25;
             for (int i = 0; i < count; i++) {
                 double phase = (double) i / SAMPLE_RATE + t;

@@ -5,7 +5,20 @@ import com.daaw.avee.comp.Visualizer.InternalVisualizationDataProvider;
 /* loaded from: classes.dex */
 public class SegmentDataProviderFactory {
     public static final String typeNameNone = "None";
-    public static final String[] typeNames = {SegmentAudioWaveformData.typeName, SegmentAudioSpectrumData.typeName, SegmentAudioSpectrumDataPhaseS.typeName};
+    public static final String[] typeNames = {
+            SegmentAudioWaveformData.typeName,
+            SegmentAudioSpectrumData.typeName,
+            SegmentAudioSpectrumDataPhaseS.typeName,
+            SegmentAeSpectrumData.typeName,
+            SegmentAeWaveformData.typeName
+    };
+    public static final String[] aeTypeNames = {
+            SegmentAeSpectrumData.typeName,
+            SegmentAeWaveformData.typeName,
+            SegmentAudioSpectrumData.typeName,
+            SegmentAudioSpectrumDataPhaseS.typeName,
+            SegmentAudioWaveformData.typeName
+    };
 
     static final class PauseFreezeState {
         boolean hasFrozenFrame = false;
@@ -28,6 +41,12 @@ public class SegmentDataProviderFactory {
     public static ISegmentDataProvider create(String str, ISegmentDataProvider iSegmentDataProvider) {
         if (getTypeName(iSegmentDataProvider, "None").equals(str)) {
             return iSegmentDataProvider;
+        }
+        if (SegmentAeSpectrumData.typeName.equals(str)) {
+            return new SegmentAeSpectrumData();
+        }
+        if (SegmentAeWaveformData.typeName.equals(str)) {
+            return new SegmentAeWaveformData();
         }
         char c = 65535;
         switch (str.hashCode()) {
@@ -84,6 +103,12 @@ public class SegmentDataProviderFactory {
         }
         if (iSegmentDataProvider instanceof SegmentAudioSpectrumDataPhaseS) {
             return SegmentAudioSpectrumDataPhaseS.typeName;
+        }
+        if (iSegmentDataProvider instanceof SegmentAeSpectrumData) {
+            return SegmentAeSpectrumData.typeName;
+        }
+        if (iSegmentDataProvider instanceof SegmentAeWaveformData) {
+            return SegmentAeWaveformData.typeName;
         }
         tlog.w("unknown instance type");
         return str;

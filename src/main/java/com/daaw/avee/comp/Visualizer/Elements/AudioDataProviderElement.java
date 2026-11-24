@@ -13,11 +13,23 @@ import mdesl.graphics.glutils.FrameBuffer;
 /* loaded from: classes.dex */
 public class AudioDataProviderElement extends Element {
     public static final String typeName = "AudioProvider";
-    private ISegmentDataProvider segmentDataProvider;
+    protected ISegmentDataProvider segmentDataProvider;
 
     @Override // com.daaw.avee.comp.Visualizer.Elements.Base.Element
     public String getElementTypeName() {
         return typeName;
+    }
+
+    protected String getDefaultProviderTypeName() {
+        return SegmentAudioSpectrumData.typeName;
+    }
+
+    protected String[] getProviderTypeNames() {
+        return SegmentDataProviderFactory.typeNames;
+    }
+
+    protected String getDefaultCustomizationName() {
+        return "Audio Provider";
     }
 
     public AudioDataProviderElement() {
@@ -33,7 +45,7 @@ public class AudioDataProviderElement extends Element {
     /* JADX INFO: Access modifiers changed from: protected */
     @Override // com.daaw.avee.comp.Visualizer.Elements.Base.Element
     public void onApplyCustomization(CustomPropertiesList customPropertiesList) {
-        ISegmentDataProvider create = SegmentDataProviderFactory.create(customPropertiesList.getChild("sampleProvider").getTypeName(SegmentAudioSpectrumData.typeName), this.segmentDataProvider);
+        ISegmentDataProvider create = SegmentDataProviderFactory.create(customPropertiesList.getChild("sampleProvider").getTypeName(getDefaultProviderTypeName()), this.segmentDataProvider);
         this.segmentDataProvider = create;
         if (create != null) {
             create.onApplyCustomization(customPropertiesList);
@@ -43,8 +55,8 @@ public class AudioDataProviderElement extends Element {
     /* JADX INFO: Access modifiers changed from: protected */
     @Override // com.daaw.avee.comp.Visualizer.Elements.Base.Element
     public void onReadCustomization(CustomPropertiesList customPropertiesList, IDependencyResourceCounter iDependencyResourceCounter) {
-        customPropertiesList.setCustomizationName("Audio Provider");
-        customPropertiesList.putEmptyChild("sampleProvider", SegmentDataProviderFactory.getTypeName(this.segmentDataProvider, SegmentAudioSpectrumData.typeName), "0_general", SegmentDataProviderFactory.typeNames);
+        customPropertiesList.setCustomizationName(getDefaultCustomizationName());
+        customPropertiesList.putEmptyChild("sampleProvider", SegmentDataProviderFactory.getTypeName(this.segmentDataProvider, getDefaultProviderTypeName()), "0_general", getProviderTypeNames());
         ISegmentDataProvider iSegmentDataProvider = this.segmentDataProvider;
         if (iSegmentDataProvider != null) {
             iSegmentDataProvider.onReadCustomization(customPropertiesList);
