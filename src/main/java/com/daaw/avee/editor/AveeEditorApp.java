@@ -19,6 +19,7 @@ import com.daaw.avee.mcp.AveeSceneService;
 import com.daaw.avee.mcp.McpBridgeServer;
 import com.daaw.avee.mcp.McpStdioServer;
 import com.daaw.avee.mcp.SceneHost;
+import imgui.ImDrawList;
 import imgui.ImFontAtlas;
 import imgui.ImFontConfig;
 import imgui.ImFontGlyphRangesBuilder;
@@ -27,6 +28,7 @@ import imgui.ImGuiViewport;
 import imgui.app.Application;
 import imgui.app.Configuration;
 import imgui.flag.ImGuiCol;
+import imgui.flag.ImGuiDragDropFlags;
 import imgui.flag.ImGuiTreeNodeFlags;
 import imgui.flag.ImGuiWindowFlags;
 import imgui.type.ImBoolean;
@@ -73,6 +75,7 @@ public class AveeEditorApp extends Application implements SceneHost {
     private int selectedCompIdx = 0;
     private int selectedElemIdx = -1; // -1 selects the composition itself
     private int[] activeDragPayload = null;
+    private int activeCompDragPayload = -1;
 
     private int previewW = 1280;
     private int previewH = 720;
@@ -523,14 +526,23 @@ public class AveeEditorApp extends Application implements SceneHost {
             ImGui.endPopup();
         }
 
-        // Action row for selected element
+        // Action row for selected element or offscreen composition
         boolean canEditElem = currentScene != null && selectedElemIdx >= 0;
-        if (ImGui.button("Up") && canEditElem) {
-            moveSelectedElement(-1);
+        boolean canMoveComp = currentScene != null && selectedElemIdx == -1 && selectedCompIdx > 0;
+        if (ImGui.button("Up") && (canEditElem || canMoveComp)) {
+            if (canEditElem) {
+                moveSelectedElement(-1);
+            } else {
+                moveSelectedComposition(-1);
+            }
         }
         ImGui.sameLine();
-        if (ImGui.button("Down") && canEditElem) {
-            moveSelectedElement(1);
+        if (ImGui.button("Down") && (canEditElem || canMoveComp)) {
+            if (canEditElem) {
+                moveSelectedElement(1);
+            } else {
+                moveSelectedComposition(1);
+            }
         }
         ImGui.sameLine();
         if (ImGui.button("Duplicate") && canEditElem) {
@@ -549,6 +561,9 @@ public class AveeEditorApp extends Application implements SceneHost {
 
         ImGui.beginChild("##TreeScroll", 0f, 0f, false);
         int[] pendingDragMove = null;
+        int[] pendingCompMove = null;
+        float rowMinX = ImGui.getWindowPosX() + 10.0f;
+        float rowMaxX = ImGui.getWindowPosX() + ImGui.getWindowWidth() - 10.0f;
         int compCount = currentScene.getEntryCount();
         for (int cIdx = 0; cIdx < compCount; cIdx++) {
             CustomComposition comp = currentScene.getEntry(cIdx);
@@ -560,6 +575,8 @@ public class AveeEditorApp extends Application implements SceneHost {
 
             String compLabel = "Composition " + cIdx + (cIdx == 0 ? " (Final)" : "");
             boolean open = ImGui.treeNodeEx(compLabel + "##comp_" + cIdx, flags);
+            float compMinY = ImGui.getItemRectMinY();
+            float compMaxY = ImGui.getItemRectMaxY();
             if (ImGui.isItemClicked()) {
                 selectedCompIdx = cIdx;
                 selectedElemIdx = -1;
@@ -567,10 +584,36 @@ public class AveeEditorApp extends Application implements SceneHost {
                     rendererCore.triggerHighlightByIndices(cIdx, -1);
                 }
             }
+            if (cIdx > 0 && ImGui.beginDragDropSource()) {
+                activeCompDragPayload = cIdx;
+                activeDragPayload = null;
+                ImGui.setDragDropPayload("AVEE_COMP", Integer.valueOf(cIdx));
+                ImGui.text("Move Composition " + cIdx + " (" + comp.getEntryCount() + " layers)");
+                ImGui.endDragDropSource();
+            }
             if (ImGui.beginDragDropTarget()) {
-                int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", int[].class);
-                if (src != null && src.length == 2) {
-                    pendingDragMove = new int[]{src[0], src[1], cIdx, comp.getEntryCount()};
+                if (activeCompDragPayload > 0) {
+                    boolean topHalf = cIdx > 0 && ImGui.getMousePosY() <= (compMinY + compMaxY) * 0.5f;
+                    int insertSlot = (cIdx == 0) ? 1 : (topHalf ? cIdx : (cIdx + 1));
+                    int resolvedComp = resolveCompositionDropIndex(activeCompDragPayload, insertSlot, compCount);
+                    Integer srcComp = ImGui.acceptDragDropPayload("AVEE_COMP", ImGuiDragDropFlags.AcceptNoDrawDefaultRect, Integer.class);
+                    if (resolvedComp > 0) {
+                        float lineY = (cIdx > 0 && topHalf) ? (compMinY - 1.5f) : (compMaxY + 1.5f);
+                        drawDropInsertionLine(rowMinX, rowMaxX, lineY);
+                        if (srcComp != null) {
+                            pendingCompMove = new int[]{srcComp.intValue(), resolvedComp};
+                        }
+                    }
+                }
+                if (activeDragPayload != null) {
+                    int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", ImGuiDragDropFlags.AcceptNoDrawDefaultRect, int[].class);
+                    int resolvedEnd = resolveLayerDropIndex(activeDragPayload[0], activeDragPayload[1], cIdx, comp.getEntryCount());
+                    if (resolvedEnd >= 0) {
+                        drawDropInsertionLine(rowMinX, rowMaxX, compMaxY + 1.5f);
+                        if (src != null && src.length == 2) {
+                            pendingDragMove = new int[]{src[0], src[1], cIdx, resolvedEnd};
+                        }
+                    }
                 }
                 ImGui.endDragDropTarget();
             }
@@ -579,11 +622,15 @@ public class AveeEditorApp extends Application implements SceneHost {
                 if (elemCount == 0) {
                     ImGui.pushStyleColor(ImGuiCol.Text, 0.55f, 0.55f, 0.55f, 1.0f);
                     ImGui.selectable("  (empty - drop layer here)##empty_" + cIdx, false);
+                    float emptyMinY = ImGui.getItemRectMinY();
                     ImGui.popStyleColor();
                     if (ImGui.beginDragDropTarget()) {
-                        int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", int[].class);
-                        if (src != null && src.length == 2) {
-                            pendingDragMove = new int[]{src[0], src[1], cIdx, 0};
+                        if (activeDragPayload != null) {
+                            int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", ImGuiDragDropFlags.AcceptNoDrawDefaultRect, int[].class);
+                            drawDropInsertionLine(rowMinX, rowMaxX, emptyMinY - 1.5f);
+                            if (src != null && src.length == 2) {
+                                pendingDragMove = new int[]{src[0], src[1], cIdx, 0};
+                            }
                         }
                         ImGui.endDragDropTarget();
                     }
@@ -612,16 +659,28 @@ public class AveeEditorApp extends Application implements SceneHost {
                             rendererCore.triggerHighlightByIndices(cIdx, eIdx);
                         }
                     }
+                    float rowMinY = ImGui.getItemRectMinY();
+                    float rowMaxY = ImGui.getItemRectMaxY();
                     if (ImGui.beginDragDropSource()) {
                         activeDragPayload = new int[]{cIdx, eIdx};
+                        activeCompDragPayload = -1;
                         ImGui.setDragDropPayload("AVEE_LAYER", activeDragPayload);
-                        ImGui.text("Move " + label + " (drop on any layer or Composition)");
+                        ImGui.text("Move " + label + " (drop between layers or on a Composition)");
                         ImGui.endDragDropSource();
                     }
                     if (ImGui.beginDragDropTarget()) {
-                        int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", int[].class);
-                        if (src != null && src.length == 2) {
-                            pendingDragMove = new int[]{src[0], src[1], cIdx, eIdx};
+                        if (activeDragPayload != null) {
+                            boolean topHalf = ImGui.getMousePosY() <= (rowMinY + rowMaxY) * 0.5f;
+                            int insertSlot = topHalf ? eIdx : (eIdx + 1);
+                            int resolved = resolveLayerDropIndex(activeDragPayload[0], activeDragPayload[1], cIdx, insertSlot);
+                            int[] src = ImGui.acceptDragDropPayload("AVEE_LAYER", ImGuiDragDropFlags.AcceptNoDrawDefaultRect, int[].class);
+                            if (resolved >= 0) {
+                                float lineY = topHalf ? (rowMinY - 1.5f) : (rowMaxY + 1.5f);
+                                drawDropInsertionLine(rowMinX, rowMaxX, lineY);
+                                if (src != null && src.length == 2) {
+                                    pendingDragMove = new int[]{src[0], src[1], cIdx, resolved};
+                                }
+                            }
                         }
                         ImGui.endDragDropTarget();
                     }
@@ -631,11 +690,17 @@ public class AveeEditorApp extends Application implements SceneHost {
             }
         }
         ImGui.endChild();
-        if (pendingDragMove != null) {
+        if (pendingCompMove != null) {
+            moveComposition(pendingCompMove[0], pendingCompMove[1]);
+            activeCompDragPayload = -1;
+            activeDragPayload = null;
+        } else if (pendingDragMove != null) {
             moveElement(pendingDragMove[0], pendingDragMove[1], pendingDragMove[2], pendingDragMove[3]);
             activeDragPayload = null;
+            activeCompDragPayload = -1;
         } else if (!ImGui.isMouseDown(0)) {
             activeDragPayload = null;
+            activeCompDragPayload = -1;
         }
     }
 
@@ -945,6 +1010,87 @@ public class AveeEditorApp extends Application implements SceneHost {
         return moved;
     }
 
+    private static void drawDropInsertionLine(float minX, float maxX, float y) {
+        if (maxX <= minX) return;
+        ImDrawList dl = ImGui.getWindowDrawList();
+        int col = ImGui.getColorU32(0.30f, 0.78f, 1.0f, 0.98f);
+        dl.addLine(minX + 3.0f, y, maxX - 3.0f, y, col, 2.5f);
+        dl.addCircleFilled(minX + 3.0f, y, 3.0f, col);
+        dl.addCircleFilled(maxX - 3.0f, y, 3.0f, col);
+    }
+
+    public static int resolveLayerDropIndex(int srcCompIdx, int srcElemIdx, int dstCompIdx, int insertSlot) {
+        if (srcCompIdx == dstCompIdx) {
+            if (insertSlot == srcElemIdx || insertSlot == srcElemIdx + 1) {
+                return -1;
+            }
+            return insertSlot > srcElemIdx ? (insertSlot - 1) : insertSlot;
+        }
+        return Math.max(0, insertSlot);
+    }
+
+    public static int resolveCompositionDropIndex(int srcCompIdx, int insertSlot, int compCount) {
+        if (srcCompIdx <= 0 || srcCompIdx >= compCount || insertSlot < 1 || insertSlot > compCount) {
+            return -1;
+        }
+        if (insertSlot == srcCompIdx || insertSlot == srcCompIdx + 1) {
+            return -1;
+        }
+        int dstIdx = insertSlot > srcCompIdx ? (insertSlot - 1) : insertSlot;
+        return (dstIdx >= 1 && dstIdx < compCount && dstIdx != srcCompIdx) ? dstIdx : -1;
+    }
+
+    public static int moveCompositionInScene(CustomScene scene, int srcIdx, int dstIdx) {
+        if (scene == null) return -1;
+        int n = scene.getEntryCount();
+        if (srcIdx <= 0 || srcIdx >= n || dstIdx <= 0 || dstIdx >= n || srcIdx == dstIdx) {
+            return -1;
+        }
+        List<CustomComposition> comps = new ArrayList<>(n);
+        List<Integer> perm = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            comps.add(scene.getEntry(i));
+            perm.add(i);
+        }
+        CustomComposition moving = comps.remove(srcIdx);
+        comps.add(dstIdx, moving);
+        int movedOldIdx = perm.remove(srcIdx);
+        perm.add(dstIdx, movedOldIdx);
+        for (int i = 0; i < n; i++) {
+            scene.setEntry(i, comps.get(i));
+        }
+        int[] oldToNew = new int[n];
+        for (int newIdx = 0; newIdx < n; newIdx++) {
+            oldToNew[perm.get(newIdx)] = newIdx;
+        }
+        remapCompositionRefsWithMap(scene, oldToNew, -1, 1);
+        return dstIdx;
+    }
+
+    private void moveSelectedComposition(int delta) {
+        if (currentScene == null || delta == 0 || selectedCompIdx <= 0) return;
+        int dstIdx = selectedCompIdx + (delta < 0 ? -1 : 1);
+        if (dstIdx >= 1 && dstIdx < currentScene.getEntryCount()) {
+            moveComposition(selectedCompIdx, dstIdx);
+        }
+    }
+
+    private void moveComposition(int srcIdx, int dstIdx) {
+        int result = moveCompositionInScene(currentScene, srcIdx, dstIdx);
+        if (result < 0) return;
+        selectedCompIdx = result;
+        selectedElemIdx = -1;
+        rendererCore.setThemeElements(currentScene);
+        currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
+        if (currentScene != null && currentScene.getEntryCount() > 0) {
+            selectedCompIdx = Math.max(0, Math.min(selectedCompIdx, currentScene.getEntryCount() - 1));
+        } else {
+            selectedCompIdx = 0;
+        }
+        rendererCore.triggerHighlightByIndices(selectedCompIdx, -1);
+        statusMessage = "Moved Composition " + srcIdx + " -> Composition " + selectedCompIdx;
+    }
+
     private void moveSelectedElement(int delta) {
         if (currentScene == null || selectedElemIdx < 0) return;
         int[] target = computeStepMoveTarget(currentScene, selectedCompIdx, selectedElemIdx, delta);
@@ -1005,6 +1151,24 @@ public class AveeEditorApp extends Application implements SceneHost {
 
     private static void remapCompositionRefsAfterDelete(CustomScene scene, int deletedIdx) {
         if (scene == null) return;
+        int newCount = scene.getEntryCount();
+        int origCount = newCount + 1;
+        int[] oldToNew = new int[origCount];
+        for (int i = 0; i < origCount; i++) {
+            if (i < deletedIdx) {
+                oldToNew[i] = i;
+            } else if (i == deletedIdx) {
+                oldToNew[i] = -1;
+            } else {
+                oldToNew[i] = i - 1;
+            }
+        }
+        int fallback = Math.max(1, Math.min(deletedIdx - 1, Math.max(1, newCount - 1)));
+        remapCompositionRefsWithMap(scene, oldToNew, deletedIdx, fallback);
+    }
+
+    private static void remapCompositionRefsWithMap(CustomScene scene, int[] oldToNew, int deletedIdx, int sourceCompFallback) {
+        if (scene == null || oldToNew == null) return;
         for (int c = 0; c < scene.getEntryCount(); c++) {
             CustomComposition comp = scene.getEntry(c);
             if (comp == null) continue;
@@ -1018,19 +1182,18 @@ public class AveeEditorApp extends Application implements SceneHost {
                             int ref = Integer.parseInt(val.substring("composition:".length()).trim());
                             if (ref == deletedIdx) {
                                 elem.putPropertyStringValue(prop, "");
-                            } else if (ref > deletedIdx) {
-                                elem.putPropertyStringValue(prop, "composition:" + (ref - 1));
+                            } else if (ref >= 0 && ref < oldToNew.length && oldToNew[ref] >= 0) {
+                                elem.putPropertyStringValue(prop, "composition:" + oldToNew[ref]);
                             }
                         } catch (NumberFormatException ignored) {}
                     }
                 }
-                if (elem.getPropertyType("sourceCompositionIndex") != null) {
-                    int ref = elem.getPropertyInt("sourceCompositionIndex", -1);
+                int ref = elem.getPropertyInt("sourceCompositionIndex", -1);
+                if (ref >= 0) {
                     if (ref == deletedIdx) {
-                        int fallback = Math.max(1, Math.min(deletedIdx - 1, Math.max(1, scene.getEntryCount() - 1)));
-                        elem.putPropertyIntValue("sourceCompositionIndex", fallback);
-                    } else if (ref > deletedIdx) {
-                        elem.putPropertyIntValue("sourceCompositionIndex", ref - 1);
+                        elem.putPropertyIntValue("sourceCompositionIndex", sourceCompFallback);
+                    } else if (ref < oldToNew.length && oldToNew[ref] >= 0) {
+                        elem.putPropertyIntValue("sourceCompositionIndex", oldToNew[ref]);
                     }
                 }
             }

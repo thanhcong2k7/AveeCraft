@@ -85,7 +85,7 @@ public class SpriteFont {
         this.fontMetricMaxHeight = i8 - i5;
         this.fontMetricHeight = i7 - i6;
         this.glyphs = new Glyph[this.charSet.count()];
-        int ceil = ((int) Math.ceil(Math.sqrt(this.charSet.count()))) * (this.fontMetricMaxHeight + 1);
+        int ceil = ((int) Math.ceil(Math.sqrt(this.charSet.count()))) * (this.fontMetricMaxHeight + 16);
         int pow2roundup = pow2roundup(ceil);
         int pow2roundup2 = pow2roundup(ceil);
         int i10 = 0;
@@ -122,20 +122,52 @@ public class SpriteFont {
         if (paint.getTextWidths(cArr, 0, count, fArr) < count) {
             tlog.w("widthsReturned < charWidths.length");
         }
-        int abs = Math.abs(i5);
+        final int pad = 8;
+        int ascent = Math.abs(i5);
+        int descent = Math.abs(i8);
+        int rowStep = Math.max(this.fontMetricMaxHeight, ascent + descent) + pad;
+        int maxWidth = Math.max(1, bitmap2.getWidth());
+
+        Rect[] glyphBounds = new Rect[this.charSet.count()];
+        int simX = pad;
+        int simBaseY = ascent + pad;
+        int maxUsedX = pad;
+        boolean wrapped = false;
+        for (int idx = 0; idx < this.charSet.count(); idx++) {
+            char[] ch = new char[]{this.charSet.getCharByIndex(idx)};
+            Rect r = new Rect();
+            paint.getTextBounds(ch, 0, 1, r);
+            glyphBounds[idx] = r;
+            int gw = Math.max(0, r.width());
+            if (simX > pad && simX + gw + pad > maxWidth) {
+                simBaseY += rowStep;
+                simX = pad;
+                wrapped = true;
+            }
+            maxUsedX = Math.max(maxUsedX, simX + gw + pad);
+            simX += gw + pad;
+        }
+        int neededWidth = pow2roundup(wrapped ? maxWidth : maxUsedX);
+        int neededHeight = pow2roundup(simBaseY + descent + pad + 1);
+        if (neededWidth > bitmap2.getWidth() || neededHeight > bitmap2.getHeight()) {
+            bitmap2 = Bitmap.createBitmap(neededWidth, neededHeight, Bitmap.Config.ARGB_8888);
+            canvas = new Canvas(bitmap2);
+        }
+
+        int abs = ascent + pad;
         canvas.drawColor(0);
-        int i12 = 0;
+        int i12 = pad;
         int i13 = 0;
         while (i13 < this.charSet.count()) {
             this.glyphs[i13] = new Glyph();
             char[] cArr2 = new char[i4];
             cArr2[i10] = this.charSet.getCharByIndex(i13);
             float f = fArr[i13];
-            Rect rect = new Rect();
-            paint.getTextBounds(cArr2, i10, i4, rect);
-            if (rect.width() + i12 >= bitmap2.getWidth()) {
-                i2 = abs + this.fontMetricMaxHeight;
-                i3 = 0;
+            Rect rect = glyphBounds[i13];
+            int gw = Math.max(0, rect.width());
+            if (i12 > pad && i12 + gw + pad > bitmap2.getWidth()) {
+                i2 = abs + rowStep;
+                i3 = pad;
             } else {
                 i2 = abs;
                 i3 = i12;
@@ -144,27 +176,24 @@ public class SpriteFont {
             int i15 = i13;
             canvas.drawText(cArr2, 0, 1, i3 - rect.left, i2, paint);
             this.glyphs[i15].x = i14;
-            this.glyphs[i15].y = i2 - Math.abs(i5);
-            this.glyphs[i15].width = rect.width();
+            this.glyphs[i15].y = i2 - ascent;
+            this.glyphs[i15].width = gw;
             this.glyphs[i15].height = this.fontMetricMaxHeight;
             this.glyphs[i15].visualXOffset = rect.left;
             this.glyphs[i15].visualYOffset = i8;
             this.glyphs[i15].spaceWidth = f;
             this.glyphs[i15].spaceHeight = this.fontMetricHeight;
-            i12 = i14 + rect.width() + 2;
+            i12 = i14 + gw + pad;
             i13 = i15 + 1;
             abs = i2;
             i4 = 1;
             i10 = 0;
         }
-        if (abs != 0) {
-            i12 = bitmap2.getWidth();
-        }
-        int pow2roundup5 = pow2roundup(i12);
-        int pow2roundup6 = pow2roundup(abs + Math.abs(i8) + 1);
+        int pow2roundup5 = neededWidth;
+        int pow2roundup6 = neededHeight;
         Bitmap createBitmap = Bitmap.createBitmap(bitmap2, 0, 0, pow2roundup5, pow2roundup6);
         this.textureDim = new Vec2f(pow2roundup5, pow2roundup6);
-        this.texture = new VTexture(createBitmap, 9729, 9729, 10497, false);
+        this.texture = new VTexture(createBitmap, 9729, 9729, 33071, false);
         this.atlasTexture = new AtlasTexture(this.texture, true);
         if (createBitmap != bitmap2) {
             createBitmap.recycle();

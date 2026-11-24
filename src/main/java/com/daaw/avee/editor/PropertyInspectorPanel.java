@@ -22,9 +22,9 @@ import imgui.ImDrawList;
 import imgui.ImGui;
 import imgui.flag.ImGuiInputTextFlags;
 import imgui.flag.ImGuiKey;
+import imgui.flag.ImGuiSliderFlags;
 import imgui.flag.ImGuiTreeNodeFlags;
 import imgui.type.ImBoolean;
-import imgui.type.ImFloat;
 import imgui.type.ImInt;
 import imgui.type.ImString;
 import java.awt.image.BufferedImage;
@@ -61,12 +61,14 @@ public class PropertyInspectorPanel {
     private final float[] tmpColor4 = new float[4];
     private final float[] tmpColor3 = new float[3];
     private final ImInt tmpCombo = new ImInt();
-    private final ImInt tmpImInt = new ImInt();
-    private final ImFloat tmpImFloat = new ImFloat();
-    private final float[] tmpEditFloat2 = new float[2];
+    private final ImString inlineEditBuf = new ImString(64);
     private final ImString tmpStr = new ImString(512);
     private String inlineEditKey = null;
+    private boolean inlineEditBufNeedsInit = false;
     private int inlineEditFocusFrames = 0;
+    private CustomPropertiesList lastInspectedProps = null;
+    private final List<String> currentFrameFieldUids = new ArrayList<>();
+    private final List<String> lastFrameFieldUids = new ArrayList<>();
     private CustomScene activeScene = null;
     private final float[] rowBounds = new float[3];
 
@@ -103,6 +105,13 @@ public class PropertyInspectorPanel {
 
     public boolean render(String title, CustomPropertiesList props, CustomScene scene) {
         this.activeScene = scene;
+        if (props != lastInspectedProps) {
+            lastInspectedProps = props;
+            inlineEditKey = null;
+            inlineEditBufNeedsInit = false;
+            inlineEditFocusFrames = 0;
+            lastFrameFieldUids.clear();
+        }
         if (props == null) {
             ImGui.textDisabled("Select an Element or Composition to inspect its properties.");
             return false;
@@ -113,12 +122,15 @@ public class PropertyInspectorPanel {
             ImGui.sameLine();
             ImGui.textDisabled("(v" + ver + ")");
         }
-        ImGui.textDisabled("Tip: Double-click any numeric value to type");
+        ImGui.textDisabled("Tip: Double-click or Ctrl+Click any numeric field to type (Tab saves & advances)");
         ImGui.separator();
 
+        currentFrameFieldUids.clear();
         ImGui.pushItemWidth(Math.max(120.0f, ImGui.getContentRegionAvailX() * 0.56f));
         boolean changed = renderPropertiesGrouped(props, 0, "");
         ImGui.popItemWidth();
+        lastFrameFieldUids.clear();
+        lastFrameFieldUids.addAll(currentFrameFieldUids);
         return changed;
     }
 
@@ -607,110 +619,256 @@ public class PropertyInspectorPanel {
     }
 
     private boolean editIntField(String label, String uid, int[] val, int min, int max) {
-        if (uid.equals(inlineEditKey)) {
+        String fieldUid = uid + "#0";
+        currentFrameFieldUids.add(fieldUid);
+        if (fieldUid.equals(inlineEditKey)) {
+            if (inlineEditBufNeedsInit) {
+                inlineEditBuf.set(Integer.toString(val[0]));
+                inlineEditBufNeedsInit = false;
+                inlineEditFocusFrames = 2;
+            }
             if (inlineEditFocusFrames > 0) {
                 ImGui.setKeyboardFocusHere();
                 inlineEditFocusFrames--;
             }
             int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
-            boolean entered = ImGui.inputInt(label + "##edit", tmpImInt, 1, 10, flags);
-            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape);
-            boolean done = entered || ImGui.isItemDeactivatedAfterEdit();
+            boolean entered = ImGui.inputText(label + "##edit_" + fieldUid, inlineEditBuf, flags);
+            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
+            boolean canCommit = (inlineEditFocusFrames == 0);
+            boolean tab = canCommit
+                    && (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
+                    && ImGui.isKeyPressed(ImGuiKey.Tab, false);
+            boolean deactivated = canCommit && (ImGui.isItemDeactivated() || ImGui.isItemDeactivatedAfterEdit());
             if (esc) {
                 inlineEditKey = null;
+                inlineEditBufNeedsInit = false;
                 return false;
             }
-            if (done || (inlineEditFocusFrames == 0 && ImGui.isItemDeactivated())) {
-                inlineEditKey = null;
-                if (done) {
-                    val[0] = tmpImInt.get();
-                    return true;
+            if (entered || tab || deactivated) {
+                boolean changed = false;
+                Integer parsed = parseEditedInt(inlineEditBuf.get());
+                if (parsed != null && parsed.intValue() != val[0]) {
+                    val[0] = parsed.intValue();
+                    changed = true;
                 }
+                advanceOrClearInlineEdit(tab, fieldUid);
+                return changed;
             }
             return false;
         }
-        boolean ch = ImGui.sliderInt(label, val, min, max);
-        if (ImGui.isItemHovered() && !ImGui.isItemActive()) {
-            ImGui.setTooltip("Double-click to type value");
+
+        int step = computeNiceIntStep(min, max);
+        int flags = ImGuiSliderFlags.NoInput;
+        boolean ch = ImGui.sliderInt(label + "##" + fieldUid, val, min, max, "%d", flags);
+        if (ch) {
+            val[0] = quantizeInt(val[0], min, max, step);
         }
-        if (ImGui.isItemHovered() && ImGui.isMouseDoubleClicked(0)) {
-            inlineEditKey = uid;
-            inlineEditFocusFrames = 2;
-            tmpImInt.set(val[0]);
-        }
+        handleInlineTrigger(fieldUid, Integer.toString(val[0]));
         return ch;
     }
 
     private boolean editFloatField(String label, String uid, float[] val, float min, float max) {
-        if (uid.equals(inlineEditKey)) {
-            if (inlineEditFocusFrames > 0) {
-                ImGui.setKeyboardFocusHere();
-                inlineEditFocusFrames--;
-            }
-            int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
-            boolean entered = ImGui.inputFloat(label + "##edit", tmpImFloat, 0f, 0f, "%.4f", flags);
-            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape);
-            boolean done = entered || ImGui.isItemDeactivatedAfterEdit();
-            if (esc) {
-                inlineEditKey = null;
-                return false;
-            }
-            if (done || (inlineEditFocusFrames == 0 && ImGui.isItemDeactivated())) {
-                inlineEditKey = null;
-                if (done) {
-                    val[0] = tmpImFloat.get();
-                    return true;
-                }
-            }
-            return false;
-        }
-        boolean ch = ImGui.sliderFloat(label, val, min, max, "%.3f");
-        if (ImGui.isItemHovered() && !ImGui.isItemActive()) {
-            ImGui.setTooltip("Double-click to type value");
-        }
-        if (ImGui.isItemHovered() && ImGui.isMouseDoubleClicked(0)) {
-            inlineEditKey = uid;
-            inlineEditFocusFrames = 2;
-            tmpImFloat.set(val[0]);
-        }
-        return ch;
+        return editSingleFloatSlot(label, uid + "#0", val, 0, min, max, computeNiceFloatStep(min, max));
     }
 
     private boolean editFloat2Field(String label, String uid, float[] val, float speed, float min, float max) {
-        if (uid.equals(inlineEditKey)) {
+        float totalW = ImGui.calcItemWidth();
+        float spacing = ImGui.getStyle().getItemInnerSpacingX();
+        float leftW = Math.max(44.0f, (totalW - spacing) * 0.5f);
+        float rightW = Math.max(44.0f, totalW - leftW - spacing);
+        float step = computeNiceFloatStep(min, max);
+        boolean changed = false;
+
+        ImGui.pushItemWidth(leftW);
+        if (editSingleFloatSlot("##" + uid + "_0", uid + "#0", val, 0, min, max, step)) {
+            changed = true;
+        }
+        ImGui.popItemWidth();
+
+        ImGui.sameLine(0.0f, spacing);
+
+        ImGui.pushItemWidth(rightW);
+        if (editSingleFloatSlot("##" + uid + "_1", uid + "#1", val, 1, min, max, step)) {
+            changed = true;
+        }
+        ImGui.popItemWidth();
+
+        ImGui.sameLine(0.0f, spacing);
+        ImGui.textUnformatted(label);
+        return changed;
+    }
+
+    private boolean editSingleFloatSlot(String widgetLabel, String fieldUid, float[] val, int idx, float min, float max, float step) {
+        currentFrameFieldUids.add(fieldUid);
+        if (fieldUid.equals(inlineEditKey)) {
+            if (inlineEditBufNeedsInit) {
+                inlineEditBuf.set(formatFloatForEdit(val[idx], step));
+                inlineEditBufNeedsInit = false;
+                inlineEditFocusFrames = 2;
+            }
             if (inlineEditFocusFrames > 0) {
                 ImGui.setKeyboardFocusHere();
                 inlineEditFocusFrames--;
             }
             int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
-            boolean entered = ImGui.inputFloat2(label + "##edit", tmpEditFloat2, "%.4f", flags);
-            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape);
-            boolean done = entered || ImGui.isItemDeactivatedAfterEdit();
+            String editLabel = widgetLabel.startsWith("##") ? ("##edit_" + fieldUid) : (widgetLabel + "##edit_" + fieldUid);
+            boolean entered = ImGui.inputText(editLabel, inlineEditBuf, flags);
+            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
+            boolean canCommit = (inlineEditFocusFrames == 0);
+            boolean tab = canCommit
+                    && (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
+                    && ImGui.isKeyPressed(ImGuiKey.Tab, false);
+            boolean deactivated = canCommit && (ImGui.isItemDeactivated() || ImGui.isItemDeactivatedAfterEdit());
             if (esc) {
                 inlineEditKey = null;
+                inlineEditBufNeedsInit = false;
                 return false;
             }
-            if (done || (inlineEditFocusFrames == 0 && ImGui.isItemDeactivated())) {
-                inlineEditKey = null;
-                if (done) {
-                    val[0] = tmpEditFloat2[0];
-                    val[1] = tmpEditFloat2[1];
-                    return true;
+            if (entered || tab || deactivated) {
+                boolean changed = false;
+                Float parsed = parseEditedFloat(inlineEditBuf.get());
+                if (parsed != null && Float.compare(parsed.floatValue(), val[idx]) != 0) {
+                    val[idx] = parsed.floatValue();
+                    changed = true;
                 }
+                advanceOrClearInlineEdit(tab, fieldUid);
+                return changed;
             }
             return false;
         }
-        boolean ch = ImGui.dragFloat2(label, val, speed, min, max, "%.3f");
-        if (ImGui.isItemHovered() && !ImGui.isItemActive()) {
-            ImGui.setTooltip("Double-click to type value");
+
+        tmpFloat[0] = val[idx];
+        String fmt = step < 0.005f ? "%.4f" : "%.3f";
+        String imguiLabel = widgetLabel.contains("##") ? widgetLabel : (widgetLabel + "##" + fieldUid);
+        boolean ch = ImGui.sliderFloat(imguiLabel, tmpFloat, min, max, fmt, ImGuiSliderFlags.NoInput);
+        if (ch) {
+            float snapped = quantizeFloat(tmpFloat[0], min, max, step);
+            if (Math.abs(snapped - val[idx]) > 1e-6f) {
+                val[idx] = snapped;
+            } else {
+                ch = false;
+            }
         }
-        if (ImGui.isItemHovered() && ImGui.isMouseDoubleClicked(0)) {
-            inlineEditKey = uid;
-            inlineEditFocusFrames = 2;
-            tmpEditFloat2[0] = val[0];
-            tmpEditFloat2[1] = val[1];
-        }
+        handleInlineTrigger(fieldUid, formatFloatForEdit(val[idx], step));
         return ch;
+    }
+
+    private void handleInlineTrigger(String fieldUid, String initialText) {
+        if (ImGui.isItemHovered()) {
+            if (!ImGui.isItemActive()) {
+                ImGui.setTooltip("Double-click or Ctrl+Click to type (Tab saves & advances)");
+            }
+            if (ImGui.isMouseDoubleClicked(0) || (ImGui.isMouseClicked(0) && ImGui.getIO().getKeyCtrl())) {
+                inlineEditKey = fieldUid;
+                inlineEditBufNeedsInit = false;
+                inlineEditBuf.set(initialText);
+                inlineEditFocusFrames = 2;
+            }
+        }
+    }
+
+    private void advanceOrClearInlineEdit(boolean tabPressed, String currentUid) {
+        if (tabPressed) {
+            boolean reverse = ImGui.getIO().getKeyShift();
+            String nextUid = findNextFieldUid(lastFrameFieldUids, currentUid, reverse);
+            if (nextUid != null) {
+                inlineEditKey = nextUid;
+                inlineEditBufNeedsInit = true;
+                inlineEditFocusFrames = 2;
+                return;
+            }
+        }
+        inlineEditKey = null;
+        inlineEditBufNeedsInit = false;
+    }
+
+    static String findNextFieldUid(List<String> order, String currentUid, boolean reverse) {
+        if (order == null || order.isEmpty() || currentUid == null) {
+            return null;
+        }
+        int idx = order.indexOf(currentUid);
+        if (idx < 0) {
+            return null;
+        }
+        int nextIdx = idx + (reverse ? -1 : 1);
+        if (nextIdx < 0 || nextIdx >= order.size()) {
+            return null;
+        }
+        return order.get(nextIdx);
+    }
+
+    static float computeNiceFloatStep(float min, float max) {
+        float span = Math.abs(max - min);
+        if (span <= 0.1f) return 0.001f;
+        if (span <= 0.5f) return 0.005f;
+        if (span <= 2.5f) return 0.01f;
+        if (span <= 6.0f) return 0.05f;
+        if (span <= 25.0f) return 0.1f;
+        if (span <= 100.0f) return 1.0f;
+        if (span <= 500.0f) return 5.0f;
+        return 10.0f;
+    }
+
+    static float quantizeFloat(float raw, float min, float max, float step) {
+        float lo = Math.min(min, max);
+        float hi = Math.max(min, max);
+        if (step <= 0.0f) {
+            return Math.max(lo, Math.min(hi, raw));
+        }
+        double snapped = Math.round(raw / (double) step) * (double) step;
+        if (snapped < lo) return lo;
+        if (snapped > hi) return hi;
+        return (float) snapped;
+    }
+
+    static int computeNiceIntStep(int min, int max) {
+        long span = Math.abs((long) max - (long) min);
+        if (span <= 100L) return 1;
+        if (span <= 500L) return 5;
+        if (span <= 2000L) return 10;
+        if (span <= 10000L) return 50;
+        return 1000;
+    }
+
+    static int quantizeInt(int raw, int min, int max, int step) {
+        int lo = Math.min(min, max);
+        int hi = Math.max(min, max);
+        if (step <= 1) {
+            return Math.max(lo, Math.min(hi, raw));
+        }
+        if (raw <= lo) return lo;
+        if (raw >= hi) return hi;
+        long snapped = Math.round(raw / (double) step) * (long) step;
+        if (snapped < lo) return lo;
+        if (snapped > hi) return hi;
+        return (int) snapped;
+    }
+
+    static Float parseEditedFloat(String text) {
+        if (text == null) return null;
+        String trimmed = text.trim().replace(',', '.');
+        if (trimmed.isEmpty()) return null;
+        try {
+            float v = Float.parseFloat(trimmed);
+            return (Float.isNaN(v) || Float.isInfinite(v)) ? null : v;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    static Integer parseEditedInt(String text) {
+        if (text == null) return null;
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) return null;
+        try {
+            return Integer.parseInt(trimmed);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static String formatFloatForEdit(float val, float step) {
+        return String.format(Locale.US, step < 0.005f ? "%.4f" : "%.3f", Float.valueOf(val));
     }
 
     private static boolean isPropertyKindToken(String token) {

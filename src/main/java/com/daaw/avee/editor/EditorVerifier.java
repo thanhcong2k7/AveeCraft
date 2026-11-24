@@ -913,11 +913,313 @@ public class EditorVerifier {
         }
         System.out.println("MCP live bridge & headless stdio server verification OK (previewPngBytes=" + headlessPng.length + ")");
 
+        // Part 1 verification: SpriteFont 1080p glyph isolation + RgbSplitEffect CRGBA & black splitting
+        verifyPart1TextAndRgbSplit(rc, audio, w, h, fbo);
+
+        // Part 2 verification: Range-adaptive even slider steps + Tab field navigation & numeric parsing
+        verifyPart2InspectorSlidersAndInput();
+
+        // Part 3 verification: Between-item drop target resolution & Composition move with child layers + ref remap
+        verifyPart3HierarchyAndCompMove(rc, audio, fbo);
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);
         GL11.glDeleteTextures(tex);
         GLFW.glfwDestroyWindow(win);
         GLFW.glfwTerminate();
+    }
+
+    private static void verifyPart1TextAndRgbSplit(RendererCore rc, DesktopAudioEngine audio, int w, int h, int fbo) throws Exception {
+        String outDirProp = System.getProperty("avee.part1OutDir", "");
+        File outDir = outDirProp.isEmpty() ? null : new File(outDirProp);
+        if (outDir != null) outDir.mkdirs();
+
+        // 1) Verify TextElement at 1080p scale (tall glyphs packed across rows) has NO dot bleed above/below glyphs
+        int hiW = 1920, hiH = 1080;
+        int hiTex = GL11.glGenTextures();
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, hiTex);
+        GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA8, hiW, hiH, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, (ByteBuffer) null);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
+        int hiFbo = GL30.glGenFramebuffers();
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, hiFbo);
+        GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D, hiTex, 0);
+        try {
+            rc.onSurfaceChanged(null, hiW, hiH);
+            CustomScene textScene = CustomScene.Create();
+            CustomComposition textComp = textScene.createDataEntry();
+            textComp.putChildTypeValue("Composition");
+            Element txtEl = ElementsFactory.create("Text", "", null);
+            CustomPropertiesList txtProps = textComp.createDataEntry();
+            txtEl.getCustomization(txtProps, 0, n -> {});
+            txtProps.putChildTypeValue("Text");
+            txtProps.putPropertyStringValue("text", "Aurora_Music_Vietnam");
+            txtProps.putPropertyIntValue("fontSize", 42);
+            txtProps.putPropertyIntValue("color", 0xFFFFFFFF);
+            txtProps.putPropertyVec2fValue("position", new com.daaw.avee.Common.Vec2f(0.5f, 0.5f));
+            txtProps.putPropertyVec2fValue("alignmentPosition", new com.daaw.avee.Common.Vec2f(0.5f, 0.5f));
+            rc.setThemeElements(textScene);
+            for (int f = 0; f < 3; f++) {
+                Looper.drainMainQueue();
+                audio.tickFrame(0.016f);
+                GLES20.setRedirectFramebuffer0(hiFbo);
+                rc.onDrawFrame(null);
+                GLES20.setRedirectFramebuffer0(0);
+            }
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, hiFbo);
+            Bitmap textBmp = GraphicsUtils.savePixels(0, 0, hiW, hiH, null);
+            if (outDir != null) {
+                try (java.io.FileOutputStream fos = new java.io.FileOutputStream(new File(outDir, "text_1080p.png"))) {
+                    textBmp.compress(Bitmap.CompressFormat.PNG, 100, fos);
+                }
+            }
+            int minY = hiH, maxY = -1;
+            int[] rowLit = new int[hiH];
+            for (int y = 0; y < hiH; y++) {
+                int cnt = 0;
+                for (int x = 0; x < hiW; x++) {
+                    int px = textBmp.getPixel(x, y);
+                    int r = (px >> 16) & 0xFF, g = (px >> 8) & 0xFF, b = px & 0xFF;
+                    if (Math.max(r, Math.max(g, b)) > 16) cnt++;
+                }
+                rowLit[y] = cnt;
+                if (cnt > 0) {
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+            if (maxY <= minY) {
+                throw new AssertionError("1080p TextElement rendered empty");
+            }
+            int botDetached = 0;
+            for (int y = Math.max(0, maxY - 5); y <= maxY; y++) {
+                if (rowLit[y] > 0 && rowLit[y] <= 4) botDetached++;
+            }
+            if (botDetached > 1) {
+                throw new AssertionError("Detected stray bottom glyph bleed dots at 1080p: botDetached=" + botDetached);
+            }
+        } finally {
+            rc.onSurfaceChanged(null, w, h);
+            GL30.glDeleteFramebuffers(hiFbo);
+            GL11.glDeleteTextures(hiTex);
+        }
+
+        // 2) Verify RgbSplitEffect exposes CRGBA split colors AND splits Black (0,0,0) on transparent into R/G/B fringes
+        com.daaw.avee.comp.Visualizer.Elements.RgbSplitEffectElement probeElem = new com.daaw.avee.comp.Visualizer.Elements.RgbSplitEffectElement();
+        CustomPropertiesList probeProps = new CustomPropertiesList(0, new org.json.JSONObject(), null);
+        probeElem.getCustomization(probeProps, 0, n -> {});
+        if (!"crgba".equals(probeProps.getPropertyType("splitColor0"))
+                || !"crgba".equals(probeProps.getPropertyType("splitColor1"))
+                || !"crgba".equals(probeProps.getPropertyType("splitColor2"))) {
+            throw new AssertionError("RgbSplitEffect splitColor properties should expose crgba type");
+        }
+
+        File blackPng = File.createTempFile("avee_black_sq_", ".png");
+        blackPng.deleteOnExit();
+        java.awt.image.BufferedImage blackBi = new java.awt.image.BufferedImage(64, 64, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        java.awt.Graphics2D bg2 = blackBi.createGraphics();
+        bg2.setColor(new java.awt.Color(0, 0, 0, 255));
+        bg2.fillRect(0, 0, 64, 64);
+        bg2.dispose();
+        javax.imageio.ImageIO.write(blackBi, "png", blackPng);
+        String blackRef = VizArchiveManager.importLocalAsset(blackPng);
+
+        CustomScene splitScene = CustomScene.Create();
+        CustomComposition finalComp = splitScene.createDataEntry();
+        finalComp.putChildTypeValue("Composition");
+        CustomComposition srcComp = splitScene.createDataEntry();
+        srcComp.putChildTypeValue("Composition");
+
+        Element imgEl = ElementsFactory.create("Image", "", null);
+        CustomPropertiesList blackImg = srcComp.createDataEntry();
+        imgEl.getCustomization(blackImg, 0, n -> {});
+        blackImg.putChildTypeValue("Image");
+        blackImg.putPropertyStringValue("customImage", blackRef);
+        blackImg.putPropertyIntValue("color", 0xFF000000);
+        blackImg.putPropertyVec2fValue("position", new com.daaw.avee.Common.Vec2f(0.5f, 0.5f));
+        blackImg.putPropertyVec2fValue("alignmentPosition", new com.daaw.avee.Common.Vec2f(0.5f, 0.5f));
+        blackImg.putPropertyVec2fValue("scale", new com.daaw.avee.Common.Vec2f(0.35f, 0.35f));
+
+        Element splitEl = ElementsFactory.create("RgbSplitEffect", "", null);
+        CustomPropertiesList splitFx = finalComp.createDataEntry();
+        splitEl.getCustomization(splitFx, 0, n -> {});
+        splitFx.putChildTypeValue("RgbSplitEffect");
+        splitFx.putPropertyStringValue("targetImage", "composition:1");
+        splitFx.putPropertyMVariableFloatValue("splitMultiplier", com.daaw.avee.comp.Visualizer.Elements.Base.MVariableFloat.CreateConstantFloat(1.0f));
+        splitFx.putPropertyMVariableFloatValue("splitAmount", com.daaw.avee.comp.Visualizer.Elements.Base.MVariableFloat.CreateConstantVec2f(0.04f, 0.0f));
+        splitFx.putPropertyIntValue("splitColor0", 0xFFFF0000);
+        splitFx.putPropertyIntValue("splitColor1", 0xFF00FF00);
+        splitFx.putPropertyIntValue("splitColor2", 0xFF0000FF);
+
+        rc.setThemeElements(splitScene);
+        for (int f = 0; f < 3; f++) {
+            Looper.drainMainQueue();
+            audio.tickFrame(0.016f);
+            GLES20.setRedirectFramebuffer0(fbo);
+            rc.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+        }
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
+        Bitmap splitBmp = GraphicsUtils.savePixels(0, 0, w, h, null);
+        if (outDir != null) {
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(new File(outDir, "rgbsplit_black.png"))) {
+                splitBmp.compress(Bitmap.CompressFormat.PNG, 100, fos);
+            }
+        }
+        int redFringe = 0, blueFringe = 0, blackCore = 0;
+        for (int y = h / 4; y < (h * 3) / 4; y++) {
+            for (int x = w / 6; x < (w * 5) / 6; x++) {
+                int px = splitBmp.getPixel(x, y);
+                int a = (px >>> 24) & 0xFF, r = (px >> 16) & 0xFF, g = (px >> 8) & 0xFF, b = px & 0xFF;
+                if (r > 180 && g < 30 && b < 30) redFringe++;
+                if (b > 180 && r < 30 && g < 30) blueFringe++;
+                if (a > 200 && r < 20 && g < 20 && b < 20) blackCore++;
+            }
+        }
+        if (redFringe < 50 || blueFringe < 50 || blackCore < 100) {
+            throw new AssertionError("RgbSplitEffect failed to split Black (0,0,0) square cleanly: redFringe="
+                    + redFringe + " blueFringe=" + blueFringe + " blackCore=" + blackCore);
+        }
+        System.out.println("Part 1 verification OK (1080p SpriteFont clean, RgbSplit black fringes R="
+                + redFringe + " B=" + blueFringe + " core=" + blackCore + ")");
+    }
+
+    private static void verifyPart2InspectorSlidersAndInput() {
+        // 1) Unit ranges use clean 0.010 increments
+        float unitStep = PropertyInspectorPanel.computeNiceFloatStep(0.0f, 1.0f);
+        float vec2Step = PropertyInspectorPanel.computeNiceFloatStep(-1.0f, 1.0f);
+        if (Math.abs(unitStep - 0.01f) > 1e-6f || Math.abs(vec2Step - 0.01f) > 1e-6f) {
+            throw new AssertionError("Expected 0.010 step for unit sliders, got " + unitStep + ", " + vec2Step);
+        }
+        float q1 = PropertyInspectorPanel.quantizeFloat(0.4227f, 0.0f, 1.0f, unitStep);
+        if (Math.abs(q1 - 0.42f) > 1e-5f) {
+            throw new AssertionError("Expected quantized 0.420, got " + q1);
+        }
+
+        // 2) Ranges above 100 use clean 5 or 10 increments instead of random fractional steps
+        float rotStep = PropertyInspectorPanel.computeNiceFloatStep(0.0f, 300.0f);
+        float depthStep = PropertyInspectorPanel.computeNiceFloatStep(0.0f, 1000.0f);
+        if (Math.abs(rotStep - 5.0f) > 1e-6f || Math.abs(depthStep - 10.0f) > 1e-6f) {
+            throw new AssertionError("Expected 5/10 step for >100 ranges, got rot=" + rotStep + " depth=" + depthStep);
+        }
+        float qRot = PropertyInspectorPanel.quantizeFloat(127.643f, 0.0f, 300.0f, rotStep);
+        if (Math.abs(qRot - 130.0f) > 1e-5f) {
+            throw new AssertionError("Expected quantized rotation 130.0, got " + qRot);
+        }
+
+        // 3) Int slider step scaling & clamping
+        if (PropertyInspectorPanel.computeNiceIntStep(0, 20) != 1
+                || PropertyInspectorPanel.computeNiceIntStep(1, 5000) != 50
+                || PropertyInspectorPanel.quantizeInt(1234, 1, 5000, 50) != 1250) {
+            throw new AssertionError("Unexpected integer slider step/quantization");
+        }
+
+        // 4) Independent Tab order across dual fields (#0 -> #1 -> next property) & Shift+Tab back
+        java.util.List<String> order = java.util.Arrays.asList("/pos#0", "/pos#1", "/scale#0", "/scale#1", "/rot#0");
+        if (!"/pos#1".equals(PropertyInspectorPanel.findNextFieldUid(order, "/pos#0", false))
+                || !"/scale#0".equals(PropertyInspectorPanel.findNextFieldUid(order, "/pos#1", false))
+                || !"/pos#0".equals(PropertyInspectorPanel.findNextFieldUid(order, "/pos#1", true))
+                || PropertyInspectorPanel.findNextFieldUid(order, "/rot#0", false) != null) {
+            throw new AssertionError("Tab field navigation order mismatch");
+        }
+
+        // 5) Manual numeric parsing (both positive/negative decimals, whitespace, invalid guard)
+        Float pf = PropertyInspectorPanel.parseEditedFloat("  1.25  ");
+        Integer pi = PropertyInspectorPanel.parseEditedInt(" 240 ");
+        if (pf == null || Math.abs(pf - 1.25f) > 1e-5f || pi == null || pi != 240
+                || PropertyInspectorPanel.parseEditedFloat("abc") != null
+                || PropertyInspectorPanel.parseEditedInt("") != null) {
+            throw new AssertionError("Manual numeric parser mismatch");
+        }
+        System.out.println("Part 2 verification OK (even steps unit=0.010 rot=5.0 depth=10.0, dual-field Tab order OK)");
+    }
+
+    private static void verifyPart3HierarchyAndCompMove(RendererCore rc, DesktopAudioEngine audio, int fbo) {
+        // 1) Drop slot resolution between items (no-op on adjacent self slots, exact adjusted index on move)
+        if (AveeEditorApp.resolveLayerDropIndex(0, 1, 0, 1) != -1
+                || AveeEditorApp.resolveLayerDropIndex(0, 1, 0, 2) != -1
+                || AveeEditorApp.resolveLayerDropIndex(0, 0, 0, 3) != 2
+                || AveeEditorApp.resolveLayerDropIndex(0, 2, 0, 0) != 0
+                || AveeEditorApp.resolveLayerDropIndex(0, 1, 1, 2) != 2) {
+            throw new AssertionError("Layer drop insertion index resolution mismatch");
+        }
+        if (AveeEditorApp.resolveCompositionDropIndex(0, 1, 3) != -1
+                || AveeEditorApp.resolveCompositionDropIndex(1, 1, 3) != -1
+                || AveeEditorApp.resolveCompositionDropIndex(1, 2, 3) != -1
+                || AveeEditorApp.resolveCompositionDropIndex(1, 3, 3) != 2
+                || AveeEditorApp.resolveCompositionDropIndex(3, 1, 4) != 1) {
+            throw new AssertionError("Composition drop insertion index resolution mismatch");
+        }
+
+        // 2) Move Composition with all child layers + automatic composition:N / sourceCompositionIndex remapping
+        CustomScene scene = CustomScene.Create();
+        CustomComposition comp0 = scene.createDataEntry();
+        comp0.putChildTypeValue("Composition");
+        CustomComposition comp1 = scene.createDataEntry();
+        comp1.putChildTypeValue("Composition");
+        CustomComposition comp2 = scene.createDataEntry();
+        comp2.putChildTypeValue("Composition");
+
+        Element imgEl = ElementsFactory.create("Image", "", null);
+        CustomPropertiesList refImg = comp0.createDataEntry();
+        imgEl.getCustomization(refImg, 0, n -> {});
+        refImg.putChildTypeValue("Image");
+        refImg.putPropertyStringValue("customImage", "composition:1");
+
+        Element blurEl = ElementsFactory.create("BlurEffect", "", null);
+        CustomPropertiesList refBlur = comp0.createDataEntry();
+        blurEl.getCustomization(refBlur, 0, n -> {});
+        refBlur.putChildTypeValue("BlurEffect");
+        refBlur.putPropertyIntValue("sourceCompositionIndex", 2);
+
+        Element txtEl1 = ElementsFactory.create("Text", "", null);
+        CustomPropertiesList c1Txt = comp1.createDataEntry();
+        txtEl1.getCustomization(c1Txt, 0, n -> {});
+        c1Txt.putChildTypeValue("Text");
+        c1Txt.putPropertyStringValue("text", "COMP1_CHILD");
+
+        Element barsEl = ElementsFactory.create("Bars", "", null);
+        CustomPropertiesList c1Bars = comp1.createDataEntry();
+        barsEl.getCustomization(c1Bars, 0, n -> {});
+        c1Bars.putChildTypeValue("Bars");
+
+        Element txtEl2 = ElementsFactory.create("Text", "", null);
+        CustomPropertiesList c2Txt = comp2.createDataEntry();
+        txtEl2.getCustomization(c2Txt, 0, n -> {});
+        c2Txt.putChildTypeValue("Text");
+        c2Txt.putPropertyStringValue("text", "COMP2_CHILD");
+
+        int movedTo = AveeEditorApp.moveCompositionInScene(scene, 1, 2);
+        if (movedTo != 2) {
+            throw new AssertionError("Expected movedTo=2, got " + movedTo);
+        }
+        if (scene.getEntry(1).getEntryCount() != 1
+                || !"COMP2_CHILD".equals(scene.getEntry(1).getData(0).getPropertyString("text", ""))) {
+            throw new AssertionError("Composition 1 after swap does not hold old Composition 2 children");
+        }
+        if (scene.getEntry(2).getEntryCount() != 2
+                || !"COMP1_CHILD".equals(scene.getEntry(2).getData(0).getPropertyString("text", ""))
+                || !"Bars".equals(scene.getEntry(2).getData(1).getTypeName(""))) {
+            throw new AssertionError("Moved Composition 2 did not preserve its child layers cleanly");
+        }
+        if (!"composition:2".equals(scene.getEntry(0).getData(0).getPropertyString("customImage", ""))
+                || scene.getEntry(0).getData(1).getPropertyInt("sourceCompositionIndex", -1) != 1) {
+            throw new AssertionError("Composition reference remapping after move failed");
+        }
+
+        rc.setThemeElements(scene);
+        for (int f = 0; f < 3; f++) {
+            Looper.drainMainQueue();
+            audio.tickFrame(0.016f);
+            GLES20.setRedirectFramebuffer0(fbo);
+            rc.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+        }
+        int glErr = GL11.glGetError();
+        if (glErr != 0) {
+            throw new AssertionError("GL error after Composition reorder: " + glErr);
+        }
+        System.out.println("Part 3 verification OK (drop line slot resolution, Composition move + child layers + ref remap OK)");
     }
 }

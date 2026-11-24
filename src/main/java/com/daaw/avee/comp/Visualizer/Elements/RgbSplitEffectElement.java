@@ -261,9 +261,9 @@ public class RgbSplitEffectElement extends Element {
         customPropertiesList.putPropertyBool("showUnblurredContentUnder", getRenderContentUnder(), "1_appearance");
         customPropertiesList.putPropertyMVariableFloat("splitMultiplier", this.splitMultiplierVar, "2_splitEffect", 0.0f, 6.0f);
         customPropertiesList.putPropertyMVariableVec2f("splitAmount", this.splitDirAmount, "2_splitEffect", -0.5f, 0.5f);
-        customPropertiesList.putPropertyIntAsCRGB("splitColor0", getSplitColor0(), "2_splitEffect");
-        customPropertiesList.putPropertyIntAsCRGB("splitColor1", getSplitColor1(), "2_splitEffect");
-        customPropertiesList.putPropertyIntAsCRGB("splitColor2", getSplitColor2(), "2_splitEffect");
+        customPropertiesList.putPropertyIntAsCRGBA("splitColor0", getSplitColor0(), "2_splitEffect", "");
+        customPropertiesList.putPropertyIntAsCRGBA("splitColor1", getSplitColor1(), "2_splitEffect", "");
+        customPropertiesList.putPropertyIntAsCRGBA("splitColor2", getSplitColor2(), "2_splitEffect", "");
     }
 
     /* JADX INFO: Access modifiers changed from: protected */
