@@ -4,13 +4,16 @@ import com.daaw.avee.Common.tlog;
 /* loaded from: classes.dex */
 public class SegmentPathFactory {
     public static final String typeNameNone = "None";
-    public static final String[] typeNames = {"HorizontalLine", SegmentPathCircle.typeName, SegmentPathSided.typeName, "Letter"};
-    public static final String[] typeNamesCelebration = {"HorizontalLine", SegmentPathCircle.typeName, SegmentPathSided.typeName, "Letter", SegmentPathYear.typeName};
-    public static final String[] typeNamesClosedAndNone = {"None", SegmentPathCircle.typeName, SegmentPathSided.typeName};
+    public static final String[] typeNames = {"HorizontalLine", SegmentPathCircle.typeName, SegmentPathSided.typeName, SegmentPathRoundedRect.typeName, "Letter"};
+    public static final String[] typeNamesCelebration = {"HorizontalLine", SegmentPathCircle.typeName, SegmentPathSided.typeName, SegmentPathRoundedRect.typeName, "Letter", SegmentPathYear.typeName};
+    public static final String[] typeNamesClosedAndNone = {"None", SegmentPathCircle.typeName, SegmentPathSided.typeName, SegmentPathRoundedRect.typeName};
 
     public static ISegmentPath create(String str, ISegmentPath iSegmentPath) {
         if (getTypeName(iSegmentPath).equals(str)) {
             return iSegmentPath;
+        }
+        if (SegmentPathRoundedRect.typeName.equals(str)) {
+            return new SegmentPathRoundedRect();
         }
         char c = 65535;
         switch (str.hashCode()) {
@@ -85,6 +88,9 @@ public class SegmentPathFactory {
         }
         if (iSegmentPath instanceof SegmentPathSided) {
             return SegmentPathSided.typeName;
+        }
+        if (iSegmentPath instanceof SegmentPathRoundedRect) {
+            return SegmentPathRoundedRect.typeName;
         }
         if (iSegmentPath instanceof SegmentPathLetter) {
             return "Letter";

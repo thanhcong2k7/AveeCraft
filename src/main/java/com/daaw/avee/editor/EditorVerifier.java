@@ -928,6 +928,9 @@ public class EditorVerifier {
         // Part 5 verification: Screen color picker GL patch read, loupe right-of-cursor placement & property writeback
         verifyPart5ScreenColorPicker(w, h, fbo);
 
+        // Part 6 verification: Shape corner roundness (RoundedRect + SidedPolygon) on Image & Bars
+        verifyPart6ShapeRoundness(rc, audio, w, h, fbo);
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);
@@ -1465,5 +1468,159 @@ public class EditorVerifier {
             GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, prevFbo);
         }
         System.out.println("Part 5 verification OK (eyedropper GL patch, right-side loupe & color property writeback OK)");
+    }
+
+    private static void verifyPart6ShapeRoundness(RendererCore rc, DesktopAudioEngine audio, int w, int h, int fbo) {
+        // 1) Factory registration & property schema check
+        com.daaw.avee.comp.Visualizer.Elements.Segment.ISegmentPath rrPath =
+                com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentPathFactory.create("RoundedRect", null);
+        if (!(rrPath instanceof com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentPathRoundedRect)) {
+            throw new AssertionError("SegmentPathFactory should construct SegmentPathRoundedRect for RoundedRect");
+        }
+        if (!"RoundedRect".equals(com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentPathFactory.getTypeName(rrPath))) {
+            throw new AssertionError("SegmentPathFactory.getTypeName mismatch for RoundedRect");
+        }
+
+        CustomPropertiesList rrProps = new CustomPropertiesList(0, new org.json.JSONObject(), null);
+        rrPath.onReadCustomization(rrProps);
+        if (rrProps.getPropertyType("roundness") == null || !rrProps.getPropertyType("roundness").startsWith("f ")) {
+            throw new AssertionError("RoundedRect missing float roundness property: " + rrProps.getPropertyType("roundness"));
+        }
+
+        com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentPathSided poly =
+                new com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentPathSided().setSides(4);
+        CustomPropertiesList polyProps = new CustomPropertiesList(0, new org.json.JSONObject(), null);
+        poly.onReadCustomization(polyProps);
+        if (polyProps.getPropertyType("roundness") == null || !polyProps.getPropertyType("roundness").startsWith("f ")) {
+            throw new AssertionError("SidedPolygon missing float roundness property");
+        }
+
+        // 2) Geometry check: RoundedRect roundness=0 hits sharp corner while roundness=0.5 rounds corner inward & outward normal points inward
+        android.graphics.RectF rect = new android.graphics.RectF(0f, 0f, 200f, 100f);
+        android.graphics.PointF pt = new android.graphics.PointF();
+        android.graphics.PointF vec = new android.graphics.PointF();
+        com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentPathRoundedRect rr =
+                (com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentPathRoundedRect) rrPath;
+        rr.setRoundness(0.0f);
+        if (rr.getPreferredPointCount(rect) != 4) {
+            throw new AssertionError("Expected 4 points for sharp RoundedRect");
+        }
+        rr.getPointOnPath(false, 0, 4, rect, 0f, pt, vec);
+        if (Math.abs(pt.x - 0f) > 0.01f || Math.abs(pt.y - 0f) > 0.01f || vec.x <= 0f || vec.y <= 0f) {
+            throw new AssertionError("Sharp RoundedRect corner 0 mismatch: pt=(" + pt.x + "," + pt.y + ") vec=(" + vec.x + "," + vec.y + ")");
+        }
+        rr.setRoundness(0.6f);
+        if (rr.getPreferredPointCount(rect) < 36) {
+            throw new AssertionError("Expected smooth point count for rounded RoundedRect");
+        }
+        // Sample point along top-left region (quarter turn from top-left): must stay strictly inside acute corner bounding box
+        boolean foundCurvedInward = false;
+        int nPts = rr.getPreferredPointCount(rect);
+        for (int i = 0; i < nPts; i++) {
+            rr.getPointOnPath(false, i, nPts, rect, 0f, pt, vec);
+            float vecLen = (float) Math.hypot(vec.x, vec.y);
+            if (Math.abs(vecLen - 1.0f) > 1e-3f) {
+                throw new AssertionError("RoundedRect normal not unit length: " + vecLen);
+            }
+            if (pt.x > 3f && pt.x < 25f && pt.y > 3f && pt.y < 25f) {
+                foundCurvedInward = true;
+            }
+        }
+        if (!foundCurvedInward) {
+            throw new AssertionError("RoundedRect with roundness=0.6 did not round corners");
+        }
+
+        // 3) Render check: white Image with RoundedRect + roundness=0.8 trims corners dark while keeping center white
+        CustomScene scene = CustomScene.Create();
+        CustomComposition comp0 = scene.createDataEntry();
+        comp0.putChildTypeValue("Composition");
+        CustomPropertiesList img = comp0.createDataEntry();
+        img.putChildTypeValue("Image");
+        img.putPropertyStringValue("customImage", "composition:0"); // internal white square fallback via White shape test below
+        img.putPropertyArray4fValue("Color", new float[]{1f, 1f, 1f, 1f});
+        img.putPropertyVec2fValue("scale", new com.daaw.avee.Common.Vec2f(0.8f, 0.8f));
+        img.putPropertySelectStringValue("customImage", "internal_0");
+        CustomPropertiesList shapeChild = img.putEmptyChild("Shape", "RoundedRect", "1_image", new String[0]);
+        shapeChild.putPropertyFloatValue("roundness", 0.85f);
+        CustomPropertiesList bars = comp0.createDataEntry();
+        bars.putChildTypeValue("Bars");
+        CustomPropertiesList barsPath = bars.putEmptyChild("ShapePath", "SidedPolygon", "1_bars", new String[0]);
+        barsPath.putPropertyIntValue("sides", 4);
+        barsPath.putPropertyFloatValue("roundness", 0.5f);
+
+        rc.setThemeElements(scene);
+        for (int f = 0; f < 3; f++) {
+            Looper.drainMainQueue();
+            audio.tickFrame(0.016f);
+            GLES20.setRedirectFramebuffer0(fbo);
+            rc.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+        }
+
+        // Also test white solid texture corner clipping directly in an offscreen white image element via 4x4 PNG
+        try {
+            File whitePng = File.createTempFile("avee_part6_white_", ".png");
+            whitePng.deleteOnExit();
+            java.awt.image.BufferedImage bi = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D g = bi.createGraphics();
+            g.setColor(java.awt.Color.WHITE);
+            g.fillRect(0, 0, 16, 16);
+            g.dispose();
+            javax.imageio.ImageIO.write(bi, "png", whitePng);
+
+            CustomScene s2 = CustomScene.Create();
+            CustomComposition c2 = s2.createDataEntry();
+            c2.putChildTypeValue("Composition");
+            CustomPropertiesList im2 = c2.createDataEntry();
+            im2.putChildTypeValue("Image");
+            im2.putPropertyStringValue("customImage", whitePng.getAbsolutePath());
+            im2.putPropertyArray4fValue("Color", new float[]{1f, 1f, 1f, 1f});
+            im2.putPropertyVec2fValue("scale", new com.daaw.avee.Common.Vec2f(0.8f, 0.8f));
+            CustomPropertiesList sh2 = im2.putEmptyChild("Shape", "RoundedRect", "1_image", new String[0]);
+
+            // First render with roundness=0.0 (sharp corner -> white at bounding corner)
+            sh2.putPropertyFloatValue("roundness", 0.0f);
+            rc.setThemeElements(s2);
+            for (int f = 0; f < 4; f++) {
+                Looper.drainMainQueue();
+                audio.tickFrame(0.016f);
+                GLES20.setRedirectFramebuffer0(fbo);
+                rc.onDrawFrame(null);
+                GLES20.setRedirectFramebuffer0(0);
+            }
+            java.nio.ByteBuffer px = java.nio.ByteBuffer.allocateDirect(w * h * 4).order(java.nio.ByteOrder.nativeOrder());
+            GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, fbo);
+            GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, px);
+            GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, 0);
+            int cornerX = Math.round(w * 0.115f);
+            int cornerY = Math.round(h * 0.115f);
+            int cornerOff = (cornerY * w + cornerX) * 4;
+            int sharpCornerR = px.get(cornerOff) & 0xFF;
+
+            // Now render with roundness=0.9 (rounded corner -> corner clipped away while center stays white)
+            sh2.putPropertyFloatValue("roundness", 0.9f);
+            rc.setThemeElements(s2);
+            for (int f = 0; f < 4; f++) {
+                Looper.drainMainQueue();
+                audio.tickFrame(0.016f);
+                GLES20.setRedirectFramebuffer0(fbo);
+                rc.onDrawFrame(null);
+                GLES20.setRedirectFramebuffer0(0);
+            }
+            px.clear();
+            GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, fbo);
+            GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, px);
+            GL30.glBindFramebuffer(GL30.GL_READ_FRAMEBUFFER, 0);
+            int centerOff = ((h / 2) * w + (w / 2)) * 4;
+            int centerR = px.get(centerOff) & 0xFF;
+            int roundedCornerR = px.get(cornerOff) & 0xFF;
+            if (sharpCornerR < 200 || centerR < 200 || roundedCornerR > 40) {
+                throw new AssertionError("RoundedRect Image corner clipping failed: sharpCornerR="
+                        + sharpCornerR + " roundedCornerR=" + roundedCornerR + " centerR=" + centerR);
+            }
+        } catch (Exception e) {
+            throw new AssertionError("Part 6 RoundedRect render check failed: " + e.getMessage(), e);
+        }
+        System.out.println("Part 6 verification OK (RoundedRect + SidedPolygon roundness property, geometry & render clipping OK)");
     }
 }
