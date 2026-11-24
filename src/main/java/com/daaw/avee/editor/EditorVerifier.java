@@ -937,6 +937,9 @@ public class EditorVerifier {
         // Part 8 verification: Private template library, off-main-thread auto-save, preview PNG & .viz round-trip
         verifyPart8TemplateLibraryAndAutoSave(rc, audio, w, h, fbo);
 
+        // Part 10 verification: Media library store, volume default/clamping, preview zoom/pan & inline numeric edit helpers
+        verifyPart10UiThemeZoomVolumeAndMediaManager();
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);
@@ -1922,5 +1925,177 @@ public class EditorVerifier {
         }
         System.out.println("Part 8 verification OK (private template store, background auto-save on "
                 + "AveeTemplateAutoSave, preview PNG 320x180 & .viz import/export OK)");
+    }
+
+    private static void verifyPart10UiThemeZoomVolumeAndMediaManager() throws Exception {
+        // 1) Audio engine: syntheticBeat defaults to false and volume clamps 0..1
+        DesktopAudioEngine freshAudio = new DesktopAudioEngine();
+        try {
+            if (freshAudio.isSyntheticBeat()) {
+                throw new AssertionError("Expected DesktopAudioEngine.isSyntheticBeat() to default to false");
+            }
+            if (!"No Audio Loaded".equals(freshAudio.getTitle())) {
+                throw new AssertionError("Expected default audio title 'No Audio Loaded', got: "
+                        + freshAudio.getTitle());
+            }
+            freshAudio.setVolume(0.35f);
+            if (Math.abs(freshAudio.getVolume() - 0.35f) > 1e-4f) {
+                throw new AssertionError("Expected volume 0.35, got " + freshAudio.getVolume());
+            }
+            freshAudio.setVolume(-0.5f);
+            if (Math.abs(freshAudio.getVolume()) > 1e-4f) {
+                throw new AssertionError("Expected volume clamped to 0.0, got " + freshAudio.getVolume());
+            }
+            freshAudio.setVolume(2.0f);
+            if (Math.abs(freshAudio.getVolume() - 1.0f) > 1e-4f) {
+                throw new AssertionError("Expected volume clamped to 1.0, got " + freshAudio.getVolume());
+            }
+        } finally {
+            freshAudio.shutdown();
+        }
+
+        // 2) MediaLibraryStore: default ~/Music seed, persistent removal, async scan of custom folder
+        java.nio.file.Path tmpRoot = java.nio.file.Files.createTempDirectory("avee_part10_media_");
+        File cfgFile = new File(tmpRoot.toFile(), "media_library.json");
+        File musicDir = new File(tmpRoot.toFile(), "custom_music");
+        File nestedDir = new File(musicDir, "sub");
+        nestedDir.mkdirs();
+        File hiddenDir = new File(musicDir, ".thumbnails");
+        hiddenDir.mkdirs();
+        File hiddenFile = new File(hiddenDir, "ignored.mp3");
+        File mp3File = new File(musicDir, "track_one.mp3");
+        File wavFile = new File(nestedDir, "track_two.wav");
+        File txtFile = new File(nestedDir, "notes.txt");
+        java.nio.file.Files.write(mp3File.toPath(), new byte[]{1, 2, 3});
+        java.nio.file.Files.write(wavFile.toPath(), new byte[]{4, 5, 6});
+        java.nio.file.Files.write(txtFile.toPath(), new byte[]{7, 8, 9});
+        java.nio.file.Files.write(hiddenFile.toPath(), new byte[]{10, 11, 12});
+
+        MediaLibraryStore store = new MediaLibraryStore(cfgFile);
+        try {
+            File defMusic = MediaLibraryStore.defaultMusicFolder();
+            if (defMusic.isDirectory()) {
+                boolean hadDef = false;
+                for (File f : store.getFolders()) {
+                    if (f.getAbsolutePath().equals(defMusic.getAbsolutePath())) {
+                        hadDef = true;
+                        break;
+                    }
+                }
+                if (!hadDef) {
+                    throw new AssertionError("Expected default ~/Music folder to be seeded initially");
+                }
+                if (!store.removeFolder(defMusic)) {
+                    throw new AssertionError("Expected removeFolder(defaultMusicFolder) to succeed");
+                }
+            }
+        } finally {
+            store.shutdown();
+        }
+
+        // Re-open same config: removal of ~/Music must persist and not be re-added
+        MediaLibraryStore reopened = new MediaLibraryStore(cfgFile);
+        try {
+            File defMusic = MediaLibraryStore.defaultMusicFolder();
+            for (File f : reopened.getFolders()) {
+                if (f.getAbsolutePath().equals(defMusic.getAbsolutePath())) {
+                    throw new AssertionError("Removed default ~/Music folder reappeared after reopen");
+                }
+            }
+            if (!reopened.addFolder(musicDir)) {
+                throw new AssertionError("Expected addFolder(custom_music) to return true");
+            }
+            if (reopened.addFolder(musicDir)) {
+                throw new AssertionError("Expected duplicate addFolder(custom_music) to return false");
+            }
+            reopened.rescanAsync();
+            long deadline = System.currentTimeMillis() + 5000L;
+            while (reopened.isScanning() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(15L);
+            }
+            if (reopened.isScanning()) {
+                throw new AssertionError("MediaLibraryStore async scan timed out");
+            }
+            String scanThread = reopened.getLastScanThreadName();
+            if (scanThread == null || !scanThread.startsWith("AveeMediaScanner")) {
+                throw new AssertionError("Expected scan on AveeMediaScanner thread, got: " + scanThread);
+            }
+            java.util.List<MediaLibraryStore.TrackEntry> tracks = reopened.getTracks();
+            if (tracks.size() != 2) {
+                throw new AssertionError("Expected 2 scanned audio tracks (.mp3, .wav), got " + tracks.size());
+            }
+            MediaLibraryStore.FolderListing listing = reopened.listDirectory(musicDir);
+            if (listing.subfolders.size() != 1
+                    || !"sub".equals(listing.subfolders.get(0).name)
+                    || listing.subfolders.get(0).itemCount != 1) {
+                throw new AssertionError("Unexpected folder listing subfolders (should exclude .thumbnails): "
+                        + listing.subfolders.size());
+            }
+            if (listing.tracks.size() != 1 || !"track_one".equals(listing.tracks.get(0).title)) {
+                throw new AssertionError("Unexpected direct tracks in folder listing: " + listing.tracks.size());
+            }
+            java.util.List<MediaLibraryStore.TrackEntry> recFolderTracks = reopened.collectTracksInFolder(musicDir);
+            if (recFolderTracks.size() != 2) {
+                throw new AssertionError("Expected 2 recursive folder tracks, got " + recFolderTracks.size());
+            }
+        } finally {
+            reopened.shutdown();
+        }
+
+        // 3) Preview viewport zoom, pan clamp & rect math
+        if (Math.abs(AveeEditorApp.clampPreviewZoom(0.05f) - 0.25f) > 1e-4f
+                || Math.abs(AveeEditorApp.clampPreviewZoom(12.0f) - 8.0f) > 1e-4f) {
+            throw new AssertionError("Preview zoom clamp failed");
+        }
+        if (Math.abs(AveeEditorApp.clampPreviewPan(999f, 800f, 800f) - 360f) > 0.1f
+                || Math.abs(AveeEditorApp.clampPreviewPan(-1500f, 800f, 2000f) - (-900f)) > 0.1f) {
+            throw new AssertionError("Preview pan clamp mismatch");
+        }
+        float[] r1 = AveeEditorApp.computeZoomedPreviewRect(800f, 600f, 1280, 720, 1.0f, 0f, 0f);
+        if (Math.abs(r1[2] - 800f) > 0.1f || Math.abs(r1[3] - 450f) > 0.1f
+                || Math.abs(r1[0] - 0f) > 0.1f || Math.abs(r1[1] - 75f) > 0.1f) {
+            throw new AssertionError("1.0x preview rect mismatch: " + java.util.Arrays.toString(r1));
+        }
+        float[] r2 = AveeEditorApp.computeZoomedPreviewRect(800f, 600f, 1280, 720, 2.5f, 40f, -20f);
+        if (Math.abs(r2[2] - 2000f) > 0.1f || Math.abs(r2[3] - 1125f) > 0.1f
+                || Math.abs(r2[0] - (-560f)) > 0.1f || Math.abs(r2[1] - (-282.5f)) > 0.1f) {
+            throw new AssertionError("2.5x + pan preview rect mismatch: " + java.util.Arrays.toString(r2));
+        }
+
+        // 3b) Auto-snapping floating mini-window math
+        java.util.List<float[]> siblings = new java.util.ArrayList<>();
+        siblings.add(new float[]{0f, 0f, 300f, 400f});
+        float[] snapLeftEdge = AveeEditorApp.snapFloatingWindowRect(
+                10f, 100f, 200f, 300f, 0f, 0f, 1000f, 800f, null, 16f);
+        float[] snapRightEdge = AveeEditorApp.snapFloatingWindowRect(
+                790f, 100f, 200f, 300f, 0f, 0f, 1000f, 800f, null, 16f);
+        float[] snapSibling = AveeEditorApp.snapFloatingWindowRect(
+                312f, 8f, 250f, 300f, 0f, 0f, 1000f, 800f, siblings, 16f);
+        float[] noSnap = AveeEditorApp.snapFloatingWindowRect(
+                400f, 100f, 250f, 300f, 0f, 0f, 1000f, 800f, siblings, 16f);
+        if (Math.abs(snapLeftEdge[0] - 0f) > 0.01f
+                || Math.abs(snapRightEdge[0] - 800f) > 0.01f
+                || Math.abs(snapSibling[0] - 300f) > 0.01f || Math.abs(snapSibling[1] - 0f) > 0.01f
+                || Math.abs(noSnap[0] - 400f) > 0.01f || Math.abs(noSnap[1] - 100f) > 0.01f) {
+            throw new AssertionError("Floating window snap mismatch: left="
+                    + java.util.Arrays.toString(snapLeftEdge)
+                    + " right=" + java.util.Arrays.toString(snapRightEdge)
+                    + " sibling=" + java.util.Arrays.toString(snapSibling)
+                    + " noSnap=" + java.util.Arrays.toString(noSnap));
+        }
+
+        // 4) Inline numeric edit parsing & step quantization (double-click edit target helpers)
+        Float parsedF = PropertyInspectorPanel.parseEditedFloat("0.375");
+        Integer parsedI = PropertyInspectorPanel.parseEditedInt("42");
+        if (parsedF == null || Math.abs(parsedF - 0.375f) > 1e-5f || parsedI == null || parsedI != 42) {
+            throw new AssertionError("Inline numeric parsing failed: f=" + parsedF + " i=" + parsedI);
+        }
+        float quantized = PropertyInspectorPanel.quantizeFloat(0.123f, 0f, 1f, 0.05f);
+        if (Math.abs(quantized - 0.10f) > 1e-5f) {
+            throw new AssertionError("Expected quantized float 0.10, got " + quantized);
+        }
+
+        System.out.println("Part 10 verification OK (silent audio default + volume clamp, media library "
+                + "AveeMediaScanner & persistent folder removal, zoom/pan rects & inline edit helpers OK)");
     }
 }

@@ -65,7 +65,9 @@ public class PropertyInspectorPanel {
     private final ImString tmpStr = new ImString(512);
     private String inlineEditKey = null;
     private boolean inlineEditBufNeedsInit = false;
-    private int inlineEditFocusFrames = 0;
+    private boolean inlineEditNeedsFocus = false;
+    private boolean inlineEditSawActive = false;
+    private int inlineEditGraceFrames = 0;
     private CustomPropertiesList lastInspectedProps = null;
     private final List<String> currentFrameFieldUids = new ArrayList<>();
     private final List<String> lastFrameFieldUids = new ArrayList<>();
@@ -114,7 +116,9 @@ public class PropertyInspectorPanel {
             lastInspectedProps = props;
             inlineEditKey = null;
             inlineEditBufNeedsInit = false;
-            inlineEditFocusFrames = 0;
+            inlineEditNeedsFocus = false;
+            inlineEditSawActive = false;
+            inlineEditGraceFrames = 0;
             lastFrameFieldUids.clear();
         }
         if (props == null) {
@@ -656,34 +660,17 @@ public class PropertyInspectorPanel {
             if (inlineEditBufNeedsInit) {
                 inlineEditBuf.set(Integer.toString(val[0]));
                 inlineEditBufNeedsInit = false;
-                inlineEditFocusFrames = 2;
+                inlineEditNeedsFocus = true;
+                inlineEditSawActive = false;
+                inlineEditGraceFrames = 2;
             }
-            if (inlineEditFocusFrames > 0) {
-                ImGui.setKeyboardFocusHere();
-                inlineEditFocusFrames--;
-            }
-            int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
-            boolean entered = ImGui.inputText(label + "##edit_" + fieldUid, inlineEditBuf, flags);
-            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
-            boolean canCommit = (inlineEditFocusFrames == 0);
-            boolean tab = canCommit
-                    && (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
-                    && ImGui.isKeyPressed(ImGuiKey.Tab, false);
-            boolean deactivated = canCommit && (ImGui.isItemDeactivated() || ImGui.isItemDeactivatedAfterEdit());
-            if (esc) {
-                inlineEditKey = null;
-                inlineEditBufNeedsInit = false;
-                return false;
-            }
-            if (entered || tab || deactivated) {
-                boolean changed = false;
-                Integer parsed = parseEditedInt(inlineEditBuf.get());
+            String committed = renderInlineTextEditor(label + "##edit_" + fieldUid, fieldUid);
+            if (committed != null) {
+                Integer parsed = parseEditedInt(committed);
                 if (parsed != null && parsed.intValue() != val[0]) {
                     val[0] = parsed.intValue();
-                    changed = true;
+                    return true;
                 }
-                advanceOrClearInlineEdit(tab, fieldUid);
-                return changed;
             }
             return false;
         }
@@ -735,35 +722,18 @@ public class PropertyInspectorPanel {
             if (inlineEditBufNeedsInit) {
                 inlineEditBuf.set(formatFloatForEdit(val[idx], step));
                 inlineEditBufNeedsInit = false;
-                inlineEditFocusFrames = 2;
+                inlineEditNeedsFocus = true;
+                inlineEditSawActive = false;
+                inlineEditGraceFrames = 2;
             }
-            if (inlineEditFocusFrames > 0) {
-                ImGui.setKeyboardFocusHere();
-                inlineEditFocusFrames--;
-            }
-            int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
             String editLabel = widgetLabel.startsWith("##") ? ("##edit_" + fieldUid) : (widgetLabel + "##edit_" + fieldUid);
-            boolean entered = ImGui.inputText(editLabel, inlineEditBuf, flags);
-            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
-            boolean canCommit = (inlineEditFocusFrames == 0);
-            boolean tab = canCommit
-                    && (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
-                    && ImGui.isKeyPressed(ImGuiKey.Tab, false);
-            boolean deactivated = canCommit && (ImGui.isItemDeactivated() || ImGui.isItemDeactivatedAfterEdit());
-            if (esc) {
-                inlineEditKey = null;
-                inlineEditBufNeedsInit = false;
-                return false;
-            }
-            if (entered || tab || deactivated) {
-                boolean changed = false;
-                Float parsed = parseEditedFloat(inlineEditBuf.get());
+            String committed = renderInlineTextEditor(editLabel, fieldUid);
+            if (committed != null) {
+                Float parsed = parseEditedFloat(committed);
                 if (parsed != null && Float.compare(parsed.floatValue(), val[idx]) != 0) {
                     val[idx] = parsed.floatValue();
-                    changed = true;
+                    return true;
                 }
-                advanceOrClearInlineEdit(tab, fieldUid);
-                return changed;
             }
             return false;
         }
@@ -784,6 +754,46 @@ public class PropertyInspectorPanel {
         return ch;
     }
 
+    /**
+     * Renders an inline InputText for numeric property entry without double-focusing or
+     * prematurely closing on the mouse-up tail of a double-click. Returns committed string, or null.
+     */
+    private String renderInlineTextEditor(String editLabel, String fieldUid) {
+        if (inlineEditNeedsFocus) {
+            ImGui.setKeyboardFocusHere();
+            inlineEditNeedsFocus = false;
+        }
+        if (inlineEditGraceFrames > 0) {
+            inlineEditGraceFrames--;
+        }
+        int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
+        boolean entered = ImGui.inputText(editLabel, inlineEditBuf, flags);
+        if (ImGui.isItemActive() && !ImGui.isMouseDown(0)) {
+            inlineEditSawActive = true;
+        }
+        boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
+        if (esc) {
+            inlineEditKey = null;
+            inlineEditBufNeedsInit = false;
+            inlineEditNeedsFocus = false;
+            inlineEditSawActive = false;
+            inlineEditGraceFrames = 0;
+            return null;
+        }
+        boolean tab = inlineEditGraceFrames == 0
+                && (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
+                && ImGui.isKeyPressed(ImGuiKey.Tab, false);
+        boolean deactivated = inlineEditGraceFrames == 0 && inlineEditSawActive
+                && !ImGui.isMouseDown(0)
+                && (ImGui.isItemDeactivated() || ImGui.isItemDeactivatedAfterEdit() || !ImGui.isItemActive());
+        if (entered || tab || deactivated) {
+            String result = inlineEditBuf.get();
+            advanceOrClearInlineEdit(tab, fieldUid);
+            return result;
+        }
+        return null;
+    }
+
     private void handleInlineTrigger(String fieldUid, String initialText) {
         if (ImGui.isItemHovered()) {
             if (!ImGui.isItemActive()) {
@@ -793,7 +803,9 @@ public class PropertyInspectorPanel {
                 inlineEditKey = fieldUid;
                 inlineEditBufNeedsInit = false;
                 inlineEditBuf.set(initialText);
-                inlineEditFocusFrames = 2;
+                inlineEditNeedsFocus = true;
+                inlineEditSawActive = false;
+                inlineEditGraceFrames = 3;
             }
         }
     }
@@ -805,12 +817,17 @@ public class PropertyInspectorPanel {
             if (nextUid != null) {
                 inlineEditKey = nextUid;
                 inlineEditBufNeedsInit = true;
-                inlineEditFocusFrames = 2;
+                inlineEditNeedsFocus = true;
+                inlineEditSawActive = false;
+                inlineEditGraceFrames = 2;
                 return;
             }
         }
         inlineEditKey = null;
         inlineEditBufNeedsInit = false;
+        inlineEditNeedsFocus = false;
+        inlineEditSawActive = false;
+        inlineEditGraceFrames = 0;
     }
 
     static String findNextFieldUid(List<String> order, String currentUid, boolean reverse) {

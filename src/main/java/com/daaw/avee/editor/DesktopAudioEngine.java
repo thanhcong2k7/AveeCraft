@@ -38,10 +38,12 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     private volatile long playheadFrame = 0L;
     private volatile boolean playing = false;
     private volatile boolean muted = false;
-    private volatile boolean syntheticBeat = true;
+    private volatile float volume = 1.0f;
+    private volatile boolean syntheticBeat = false;
     private volatile boolean highQualityBlur = true;
     private volatile long seekRevision = 0L;
-    private volatile String currentTitle = "No Audio Loaded (Test Signal)";
+    private volatile long completedCount = 0L;
+    private volatile String currentTitle = "No Audio Loaded";
     private volatile String currentArtist = "Avee Desktop Editor";
     private volatile File audioFile;
     private volatile String embeddedArtPath = null;
@@ -169,6 +171,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                     if (framesThisStep <= 0) {
                         synchronized (playLock) {
                             if (this.seekRevision == iterSeekRev) {
+                                this.completedCount++;
                                 this.playheadFrame = 0L;
                                 AppDesign.setTrackPositionMs(0L);
                             }
@@ -177,8 +180,11 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                     }
                     if (line != null) {
                         int bytes = framesThisStep * CHANNELS * 2;
+                        float gain = isMute ? 0.0f : this.volume;
                         for (int i = 0; i < framesThisStep * CHANNELS; i++) {
-                            short s = isMute ? 0 : samples[(int) (curFrame * CHANNELS + i)];
+                            int raw = samples[(int) (curFrame * CHANNELS + i)];
+                            int scaled = gain <= 0.0f ? 0 : Math.max(-32768, Math.min(32767, Math.round(raw * gain)));
+                            short s = (short) scaled;
                             chunk[i * 2] = (byte) (s & 0xFF);
                             chunk[i * 2 + 1] = (byte) ((s >> 8) & 0xFF);
                         }
@@ -215,10 +221,13 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     public void setPlaying(boolean p) { this.playing = p; }
     public boolean isMuted() { return muted; }
     public void setMuted(boolean m) { this.muted = m; }
+    public float getVolume() { return volume; }
+    public void setVolume(float v) { this.volume = Math.max(0.0f, Math.min(1.0f, v)); }
     public boolean isSyntheticBeat() { return syntheticBeat; }
     public void setSyntheticBeat(boolean s) { this.syntheticBeat = s; }
     @Override public boolean isAudioPausedForFreeze() { return !isPlaying(); }
     @Override public long getAudioSeekGeneration() { return seekRevision; }
+    public long getCompletedCount() { return completedCount; }
     public boolean isHighQualityBlur() { return highQualityBlur; }
     public void setHighQualityBlur(boolean h) { this.highQualityBlur = h; }
     public boolean hasAudioLoaded() { return totalFrames > 0; }

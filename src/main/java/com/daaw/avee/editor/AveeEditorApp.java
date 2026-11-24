@@ -20,17 +20,20 @@ import com.daaw.avee.mcp.McpBridgeServer;
 import com.daaw.avee.mcp.McpStdioServer;
 import com.daaw.avee.mcp.SceneHost;
 import imgui.ImDrawList;
+import imgui.ImFont;
 import imgui.ImFontAtlas;
 import imgui.ImFontConfig;
-import imgui.ImFontGlyphRangesBuilder;
 import imgui.ImGui;
 import imgui.ImGuiViewport;
 import imgui.app.Application;
 import imgui.app.Configuration;
 import imgui.flag.ImGuiCol;
+import imgui.flag.ImGuiConfigFlags;
+import imgui.flag.ImGuiDir;
 import imgui.flag.ImGuiDragDropFlags;
 import imgui.flag.ImGuiInputTextFlags;
 import imgui.flag.ImGuiKey;
+import imgui.flag.ImGuiStyleVar;
 import imgui.flag.ImGuiTreeNodeFlags;
 import imgui.flag.ImGuiWindowFlags;
 import imgui.type.ImBoolean;
@@ -75,7 +78,9 @@ public class AveeEditorApp extends Application implements SceneHost {
     private final PropertyInspectorPanel inspector = new PropertyInspectorPanel();
     private final ExportDialogPanel exportDialog = new ExportDialogPanel();
     private final TemplatePickerPanel templatePicker = new TemplatePickerPanel();
+    private final MediaLibraryPanel mediaPanel = new MediaLibraryPanel();
     private TemplateLibraryStore templateLibrary;
+    private MediaLibraryStore mediaLibrary;
     private String activeTemplateId = TemplateLibraryStore.presetId(0);
     private RendererCore thumbRenderer;
     private int thumbFbo = 0;
@@ -83,6 +88,30 @@ public class AveeEditorApp extends Application implements SceneHost {
     private final java.util.Set<String> warmedPreviewIds = new java.util.HashSet<>();
     private boolean previewRefreshPending = false;
     private long previewDirtyAtNs = 0L;
+
+    private enum AppPage {
+        VISUALIZER,
+        LIBRARY
+    }
+
+    private AppPage activePage = AppPage.VISUALIZER;
+    private final ImBoolean showSceneHierarchy = new ImBoolean(true);
+    private final ImBoolean showPropertyInspector = new ImBoolean(true);
+    private boolean dockLayoutInitialized = false;
+    private boolean requestResetDockLayout = false;
+    private final java.util.Map<String, float[]> floatingWindowRects = new java.util.LinkedHashMap<>();
+    private final java.util.Set<String> movedFloatingWindows = new java.util.HashSet<>();
+    private boolean prevMouseDownLeft = false;
+
+    private final List<File> playbackQueue = new ArrayList<>();
+    private int playbackQueueIndex = -1;
+    private long lastObservedCompletedCount = 0L;
+    private boolean loopSingleTrack = false;
+
+    private float previewZoom = 1.0f;
+    private float previewPanX = 0.0f;
+    private float previewPanY = 0.0f;
+    private final float[] volumeTmp = {100.0f};
 
     private int selectedCompIdx = 0;
     private int selectedElemIdx = -1; // -1 selects the composition itself
@@ -101,8 +130,6 @@ public class AveeEditorApp extends Application implements SceneHost {
     private File currentProjectFile = null;
     private long lastFrameNs = System.nanoTime();
     private final ImBoolean hqBlurChk = new ImBoolean(true);
-    private final ImBoolean synthChk = new ImBoolean(true);
-    private final ImBoolean muteChk = new ImBoolean(false);
     private final float[] seekTmp = new float[1];
     private final ImString timestampEditBuf = new ImString(32);
     private boolean timestampEditing = false;
@@ -150,16 +177,78 @@ public class AveeEditorApp extends Application implements SceneHost {
         if (fontPath != null) {
             ImFontAtlas fonts = ImGui.getIO().getFonts();
             fonts.clear();
-            ImFontGlyphRangesBuilder builder = new ImFontGlyphRangesBuilder();
-            builder.addRanges(fonts.getGlyphRangesDefault());
-            builder.addRanges(fonts.getGlyphRangesVietnamese());
-            builder.addRanges(new short[]{0x0100, 0x024F, 0x1E00, 0x1EFF, 0x2000, 0x26FF, 0});
             ImFontConfig cfg = new ImFontConfig();
-            if (fonts.addFontFromFileTTF(fontPath, 15.0f, cfg, builder.buildRanges()) == null) {
-                fonts.addFontDefault();
-            }
+            ImFont loaded = fonts.addFontFromFileTTF(fontPath, 15.0f, cfg, fonts.getGlyphRangesVietnamese());
+            boolean built = (loaded != null) && fonts.build();
             cfg.destroy();
+            if (!built) {
+                fonts.clear();
+                fonts.addFontDefault();
+                fonts.build();
+            }
         }
+        ImGui.getIO().addConfigFlags(ImGuiConfigFlags.DockingEnable);
+        ImGui.getIO().setConfigWindowsMoveFromTitleBarOnly(true);
+        applyModernUiTheme();
+    }
+
+    private static void applyModernUiTheme() {
+        imgui.ImGuiStyle st = ImGui.getStyle();
+        st.setWindowPadding(8.0f, 8.0f);
+        st.setFramePadding(7.0f, 4.0f);
+        st.setItemSpacing(7.0f, 5.0f);
+        st.setItemInnerSpacing(5.0f, 4.0f);
+        st.setIndentSpacing(16.0f);
+        st.setScrollbarSize(12.0f);
+        st.setGrabMinSize(10.0f);
+        st.setWindowBorderSize(1.0f);
+        st.setChildBorderSize(1.0f);
+        st.setFrameBorderSize(1.0f);
+        st.setWindowRounding(6.0f);
+        st.setChildRounding(5.0f);
+        st.setFrameRounding(5.0f);
+        st.setPopupRounding(5.0f);
+        st.setScrollbarRounding(6.0f);
+        st.setGrabRounding(4.0f);
+        st.setTabRounding(5.0f);
+
+        st.setColor(ImGuiCol.Text, 0.93f, 0.95f, 0.98f, 1.0f);
+        st.setColor(ImGuiCol.TextDisabled, 0.54f, 0.59f, 0.67f, 1.0f);
+        st.setColor(ImGuiCol.WindowBg, 0.08f, 0.09f, 0.12f, 0.98f);
+        st.setColor(ImGuiCol.ChildBg, 0.10f, 0.11f, 0.15f, 0.96f);
+        st.setColor(ImGuiCol.PopupBg, 0.10f, 0.11f, 0.15f, 0.98f);
+        st.setColor(ImGuiCol.Border, 0.21f, 0.25f, 0.33f, 0.85f);
+        st.setColor(ImGuiCol.FrameBg, 0.14f, 0.16f, 0.21f, 1.0f);
+        st.setColor(ImGuiCol.FrameBgHovered, 0.19f, 0.22f, 0.29f, 1.0f);
+        st.setColor(ImGuiCol.FrameBgActive, 0.22f, 0.26f, 0.35f, 1.0f);
+        st.setColor(ImGuiCol.TitleBg, 0.09f, 0.11f, 0.15f, 1.0f);
+        st.setColor(ImGuiCol.TitleBgActive, 0.13f, 0.16f, 0.22f, 1.0f);
+        st.setColor(ImGuiCol.TitleBgCollapsed, 0.08f, 0.09f, 0.12f, 0.85f);
+        st.setColor(ImGuiCol.MenuBarBg, 0.09f, 0.10f, 0.14f, 1.0f);
+        st.setColor(ImGuiCol.ScrollbarBg, 0.07f, 0.08f, 0.11f, 0.8f);
+        st.setColor(ImGuiCol.ScrollbarGrab, 0.24f, 0.28f, 0.36f, 1.0f);
+        st.setColor(ImGuiCol.ScrollbarGrabHovered, 0.32f, 0.38f, 0.49f, 1.0f);
+        st.setColor(ImGuiCol.ScrollbarGrabActive, 0.22f, 0.65f, 0.90f, 1.0f);
+        st.setColor(ImGuiCol.CheckMark, 0.24f, 0.78f, 0.98f, 1.0f);
+        st.setColor(ImGuiCol.SliderGrab, 0.22f, 0.68f, 0.92f, 1.0f);
+        st.setColor(ImGuiCol.SliderGrabActive, 0.34f, 0.82f, 1.00f, 1.0f);
+        st.setColor(ImGuiCol.Button, 0.17f, 0.21f, 0.28f, 1.0f);
+        st.setColor(ImGuiCol.ButtonHovered, 0.21f, 0.44f, 0.68f, 1.0f);
+        st.setColor(ImGuiCol.ButtonActive, 0.17f, 0.37f, 0.58f, 1.0f);
+        st.setColor(ImGuiCol.Header, 0.18f, 0.22f, 0.30f, 0.90f);
+        st.setColor(ImGuiCol.HeaderHovered, 0.20f, 0.44f, 0.68f, 0.85f);
+        st.setColor(ImGuiCol.HeaderActive, 0.19f, 0.38f, 0.60f, 1.0f);
+        st.setColor(ImGuiCol.Separator, 0.22f, 0.26f, 0.34f, 0.80f);
+        st.setColor(ImGuiCol.ResizeGrip, 0.24f, 0.72f, 0.95f, 0.30f);
+        st.setColor(ImGuiCol.ResizeGripHovered, 0.24f, 0.72f, 0.95f, 0.70f);
+        st.setColor(ImGuiCol.ResizeGripActive, 0.34f, 0.82f, 1.00f, 0.95f);
+        st.setColor(ImGuiCol.Tab, 0.13f, 0.16f, 0.21f, 0.95f);
+        st.setColor(ImGuiCol.TabHovered, 0.20f, 0.45f, 0.70f, 1.0f);
+        st.setColor(ImGuiCol.TabActive, 0.16f, 0.36f, 0.56f, 1.0f);
+        st.setColor(ImGuiCol.TabUnfocused, 0.10f, 0.12f, 0.16f, 0.95f);
+        st.setColor(ImGuiCol.TabUnfocusedActive, 0.14f, 0.23f, 0.34f, 1.0f);
+        st.setColor(ImGuiCol.DockingPreview, 0.14f, 0.68f, 0.94f, 0.55f);
+        st.setColor(ImGuiCol.DockingEmptyBg, 0.06f, 0.07f, 0.10f, 1.0f);
     }
 
     @Override
@@ -175,6 +264,8 @@ public class AveeEditorApp extends Application implements SceneHost {
         rendererCore.onSurfaceChanged(null, previewW, previewH);
 
         templateLibrary = new TemplateLibraryStore();
+        mediaLibrary = new MediaLibraryStore();
+        mediaLibrary.rescanAsync();
         thumbRenderer = new RendererCore(ctx, ctx.getResources(), audioEngine);
         thumbRenderer.onSurfaceCreated(null, null);
         ensureThumbFbo(TemplateLibraryStore.THUMB_W, TemplateLibraryStore.THUMB_H);
@@ -291,6 +382,9 @@ public class AveeEditorApp extends Application implements SceneHost {
         templatePicker.dispose();
         if (templateLibrary != null) {
             templateLibrary.shutdown();
+        }
+        if (mediaLibrary != null) {
+            mediaLibrary.shutdown();
         }
         inspector.dispose();
         if (audioEngine != null) {
@@ -446,43 +540,146 @@ public class AveeEditorApp extends Application implements SceneHost {
 
     private void renderEditorUi() {
         renderMainMenuBar();
+        syncPlaybackQueueAdvance();
+
+        boolean mouseDownLeft = ImGui.isMouseDown(0);
+        boolean mouseReleasedLeft = prevMouseDownLeft && !mouseDownLeft;
+        prevMouseDownLeft = mouseDownLeft;
 
         ImGuiViewport vp = ImGui.getMainViewport();
-        ImGui.setNextWindowPos(vp.getWorkPosX(), vp.getWorkPosY());
-        ImGui.setNextWindowSize(vp.getWorkSizeX(), vp.getWorkSizeY());
-        int hostFlags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoResize
-                | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoNavFocus;
+        float vpX = vp.getWorkPosX();
+        float vpY = vp.getWorkPosY();
+        float totalW = Math.max(760f, vp.getWorkSizeX());
+        float totalH = Math.max(460f, vp.getWorkSizeY());
 
-        ImGui.pushStyleVar(imgui.flag.ImGuiStyleVar.WindowPadding, 6f, 6f);
-        ImGui.begin("##AveeCraftHost", hostFlags);
-        ImGui.popStyleVar();
+        float navW = 148f;
+        float bottomBarH = 68f;
+        float contentX = vpX + navW;
+        float contentY = vpY;
+        float contentW = Math.max(400f, totalW - navW);
+        float contentH = Math.max(240f, totalH - bottomBarH);
 
-        float totalW = ImGui.getContentRegionAvailX();
-        float totalH = ImGui.getContentRegionAvailY();
-        float leftW = Math.max(250f, Math.min(310f, totalW * 0.21f));
-        float rightW = Math.max(330f, Math.min(430f, totalW * 0.28f));
-        float centerW = Math.max(280f, totalW - leftW - rightW - 16f);
+        // 1. Left Persistent Navigation Sidebar (Library / Visualizer)
+        renderNavigationSidebar(vpX, vpY, navW, contentH);
 
-        // Left: Scene Tree
-        ImGui.beginChild("##SceneTreePane", leftW, totalH, true);
-        renderSceneTreePanel();
-        ImGui.endChild();
+        // 2. Main Workspace Content (Library Page OR Dockable Auto-Snapping Visualizer Mini-Windows)
+        if (activePage == AppPage.LIBRARY) {
+            ImGui.setNextWindowPos(contentX, contentY, imgui.flag.ImGuiCond.Always);
+            ImGui.setNextWindowSize(contentW, contentH, imgui.flag.ImGuiCond.Always);
+            int libFlags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+                    | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoSavedSettings;
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowPadding, 0f, 0f);
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
+            ImGui.begin("##LibraryPageHost", libFlags);
+            mediaPanel.renderLibraryPage(mediaLibrary, new MediaLibraryPanel.HostCallbacks() {
+                @Override
+                public void onPlayTrack(File audioFile) {
+                    if (audioFile != null) {
+                        playQueue(java.util.Collections.singletonList(audioFile), 0);
+                    }
+                }
 
-        ImGui.sameLine();
+                @Override
+                public void onPlayQueue(List<File> tracks, int startIndex) {
+                    playQueue(tracks, startIndex);
+                }
 
-        // Center: Live Preview + Audio Transport
-        ImGui.beginChild("##CenterPane", centerW, totalH, true);
-        renderPreviewAndTransportPanel();
-        ImGui.endChild();
+                @Override
+                public void onEnqueueTracks(List<File> tracks) {
+                    enqueueTracks(tracks);
+                }
 
-        ImGui.sameLine();
+                @Override
+                public File getCurrentAudioFile() {
+                    return audioEngine != null ? audioEngine.getAudioFile() : null;
+                }
 
-        // Right: Property Inspector
-        ImGui.beginChild("##InspectorPane", rightW, totalH, true);
-        renderInspectorPanel();
-        ImGui.endChild();
+                @Override
+                public List<File> getPlaybackQueue() {
+                    return new ArrayList<>(playbackQueue);
+                }
 
-        ImGui.end();
+                @Override
+                public int getPlaybackQueueIndex() {
+                    return playbackQueueIndex;
+                }
+
+                @Override
+                public void onOpenVisualizer() {
+                    activePage = AppPage.VISUALIZER;
+                }
+            });
+            ImGui.end();
+            ImGui.popStyleVar(3);
+        } else {
+            ImGui.setNextWindowPos(contentX, contentY, imgui.flag.ImGuiCond.Always);
+            ImGui.setNextWindowSize(contentW, contentH, imgui.flag.ImGuiCond.Always);
+            int hostFlags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+                    | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoDocking
+                    | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoNavFocus
+                    | ImGuiWindowFlags.NoSavedSettings;
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowPadding, 0f, 0f);
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
+            ImGui.begin("##VisualizerDockHost", hostFlags);
+            int dockId = ImGui.getID("AveeVisualizerDockSpace");
+            if (!dockLayoutInitialized || requestResetDockLayout) {
+                dockLayoutInitialized = true;
+                requestResetDockLayout = false;
+                floatingWindowRects.clear();
+                movedFloatingWindows.clear();
+                imgui.internal.ImGui.dockBuilderRemoveNode(dockId);
+                imgui.internal.ImGui.dockBuilderAddNode(dockId, imgui.internal.flag.ImGuiDockNodeFlags.DockSpace);
+                imgui.internal.ImGui.dockBuilderSetNodePos(dockId, contentX, contentY);
+                imgui.internal.ImGui.dockBuilderSetNodeSize(dockId, contentW, contentH);
+                ImInt dockMainId = new ImInt(dockId);
+                ImInt leftId = new ImInt();
+                ImInt rightId = new ImInt();
+                imgui.internal.ImGui.dockBuilderSplitNode(dockMainId.get(), ImGuiDir.Left, 0.21f, leftId, dockMainId);
+                imgui.internal.ImGui.dockBuilderSplitNode(dockMainId.get(), ImGuiDir.Right, 0.34f, rightId, dockMainId);
+                imgui.internal.ImGui.dockBuilderDockWindow("Scene Hierarchy###HierarchyMini", leftId.get());
+                imgui.internal.ImGui.dockBuilderDockWindow("Property Inspector###InspectorMini", rightId.get());
+                imgui.internal.ImGui.dockBuilderDockWindow("Preview###PreviewMini", dockMainId.get());
+                imgui.internal.ImGui.dockBuilderFinish(dockId);
+            }
+            ImGui.dockSpace(dockId, 0f, 0f, imgui.internal.flag.ImGuiDockNodeFlags.None);
+            ImGui.end();
+            ImGui.popStyleVar(3);
+
+            int miniFlags = ImGuiWindowFlags.NoCollapse;
+            ImGui.setNextWindowSize(Math.max(420f, contentW * 0.48f), Math.max(320f, contentH * 0.85f),
+                    imgui.flag.ImGuiCond.FirstUseEver);
+            ImGui.begin("Preview###PreviewMini", miniFlags);
+            renderPreviewViewportPanel();
+            trackAndSnapFloatingWindow("Preview###PreviewMini", contentX, contentY, contentW, contentH, mouseReleasedLeft);
+            ImGui.end();
+
+            if (showSceneHierarchy.get()) {
+                ImGui.setNextWindowSize(280f, Math.max(300f, contentH * 0.85f), imgui.flag.ImGuiCond.FirstUseEver);
+                ImGui.begin("Scene Hierarchy###HierarchyMini", showSceneHierarchy, miniFlags);
+                renderSceneTreePanel();
+                trackAndSnapFloatingWindow("Scene Hierarchy###HierarchyMini", contentX, contentY, contentW, contentH, mouseReleasedLeft);
+                ImGui.end();
+            } else {
+                floatingWindowRects.remove("Scene Hierarchy###HierarchyMini");
+                movedFloatingWindows.remove("Scene Hierarchy###HierarchyMini");
+            }
+
+            if (showPropertyInspector.get()) {
+                ImGui.setNextWindowSize(360f, Math.max(320f, contentH * 0.85f), imgui.flag.ImGuiCond.FirstUseEver);
+                ImGui.begin("Property Inspector###InspectorMini", showPropertyInspector, miniFlags);
+                renderInspectorPanel();
+                trackAndSnapFloatingWindow("Property Inspector###InspectorMini", contentX, contentY, contentW, contentH, mouseReleasedLeft);
+                ImGui.end();
+            } else {
+                floatingWindowRects.remove("Property Inspector###InspectorMini");
+                movedFloatingWindows.remove("Property Inspector###InspectorMini");
+            }
+        }
+
+        // 3. Persistent Bottom Playback Bar (always visible across Library and Visualizer)
+        renderBottomPlaybackBar(vpX, vpY + totalH - bottomBarH, totalW, bottomBarH);
 
         exportDialog.render(currentScene, rendererCore, audioEngine, previewW, previewH);
         renderTemplatePickerModal();
@@ -492,6 +689,439 @@ public class AveeEditorApp extends Application implements SceneHost {
             applySceneChanges(true);
             statusMessage = "Picked color from screen";
         });
+    }
+
+    private void renderNavigationSidebar(float x, float y, float w, float h) {
+        ImGui.setNextWindowPos(x, y, imgui.flag.ImGuiCond.Always);
+        ImGui.setNextWindowSize(w, h, imgui.flag.ImGuiCond.Always);
+        int flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+                | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoSavedSettings;
+        ImGui.pushStyleColor(ImGuiCol.WindowBg, 0.065f, 0.075f, 0.10f, 1.0f);
+        ImGui.pushStyleVar(ImGuiStyleVar.WindowPadding, 0f, 0f);
+        ImGui.pushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
+        ImGui.begin("##AppNavSidebar", flags);
+
+        ImDrawList dl = ImGui.getWindowDrawList();
+        dl.addLine(x + w - 1f, y, x + w - 1f, y + h, ImGui.getColorU32(0.18f, 0.22f, 0.29f, 0.9f), 1.0f);
+        dl.addText(x + 16f, y + 14f, ImGui.getColorU32(0.95f, 0.97f, 1.0f, 1.0f), "AveeCraft");
+        dl.addLine(x + 12f, y + 40f, x + w - 12f, y + 40f, ImGui.getColorU32(0.20f, 0.24f, 0.32f, 0.7f), 1.0f);
+
+        if (renderSidebarNavItem(dl, "Library", "##NavLibrary", x, y + 50f, w, 42f,
+                activePage == AppPage.LIBRARY, true)) {
+            activePage = AppPage.LIBRARY;
+        }
+        if (renderSidebarNavItem(dl, "Visualizer", "##NavVisualizer", x, y + 96f, w, 42f,
+                activePage == AppPage.VISUALIZER, false)) {
+            activePage = AppPage.VISUALIZER;
+        }
+
+        // Bottom sidebar summary + Templates button
+        float footerY = y + h - 84f;
+        dl.addLine(x + 12f, footerY - 8f, x + w - 12f, footerY - 8f, ImGui.getColorU32(0.20f, 0.24f, 0.32f, 0.7f), 1.0f);
+        int trackCnt = mediaLibrary != null ? mediaLibrary.getTracks().size() : 0;
+        dl.addText(x + 14f, footerY, ImGui.getColorU32(0.54f, 0.59f, 0.67f, 1.0f), trackCnt + " audio tracks");
+
+        ImGui.setCursorScreenPos(x + 12f, footerY + 24f);
+        if (ImGui.button("Templates...", w - 24f, 26f)) {
+            templatePicker.open();
+        }
+        ImGui.setCursorScreenPos(x + 12f, footerY + 54f);
+        ImGui.pushStyleColor(ImGuiCol.Text, 0.52f, 0.57f, 0.65f, 1.0f);
+        ImGui.textUnformatted(activePresetIdx >= 0 ? ("Preset " + activePresetIdx) : "Custom Scene");
+        ImGui.popStyleColor();
+
+        ImGui.end();
+        ImGui.popStyleVar(2);
+        ImGui.popStyleColor();
+    }
+
+    private boolean renderSidebarNavItem(ImDrawList dl, String label, String uid,
+                                         float x, float y, float w, float h,
+                                         boolean active, boolean isLibraryIcon) {
+        ImGui.setCursorScreenPos(x, y);
+        boolean clicked = ImGui.invisibleButton(uid, w, h);
+        boolean hovered = ImGui.isItemHovered();
+        if (active) {
+            dl.addRectFilled(x, y, x + w - 1f, y + h, ImGui.getColorU32(0.11f, 0.20f, 0.28f, 0.95f));
+            dl.addRectFilled(x, y, x + 4f, y + h, ImGui.getColorU32(0.0f, 0.72f, 0.96f, 1.0f));
+        } else if (hovered) {
+            dl.addRectFilled(x, y, x + w - 1f, y + h, ImGui.getColorU32(0.14f, 0.17f, 0.23f, 0.85f));
+        }
+        int iconCol = active ? ImGui.getColorU32(0.24f, 0.82f, 1.0f, 1.0f) : ImGui.getColorU32(0.66f, 0.71f, 0.78f, 1.0f);
+        int textCol = active ? ImGui.getColorU32(0.96f, 0.98f, 1.0f, 1.0f) : ImGui.getColorU32(0.76f, 0.80f, 0.86f, 1.0f);
+        float icx = x + 24f;
+        float icy = y + h * 0.5f;
+        if (isLibraryIcon) {
+            dl.addRectFilled(icx - 7f, icy - 6f, icx - 1f, icy - 3f, iconCol, 1.5f);
+            dl.addRectFilled(icx - 7f, icy - 4f, icx + 7f, icy + 6f, iconCol, 1.5f);
+        } else {
+            dl.addRectFilled(icx - 7f, icy - 1f, icx - 4f, icy + 6f, iconCol, 1f);
+            dl.addRectFilled(icx - 1.5f, icy - 7f, icx + 1.5f, icy + 6f, iconCol, 1f);
+            dl.addRectFilled(icx + 4f, icy - 4f, icx + 7f, icy + 6f, iconCol, 1f);
+        }
+        dl.addText(x + 42f, y + (h - ImGui.getFontSize()) * 0.5f, textCol, label);
+        return clicked;
+    }
+
+    private void renderBottomPlaybackBar(float x, float y, float w, float h) {
+        ImGui.setNextWindowPos(x, y, imgui.flag.ImGuiCond.Always);
+        ImGui.setNextWindowSize(w, h, imgui.flag.ImGuiCond.Always);
+        int flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+                | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoScrollbar
+                | ImGuiWindowFlags.NoSavedSettings;
+        ImGui.pushStyleColor(ImGuiCol.WindowBg, 0.085f, 0.095f, 0.115f, 1.0f);
+        ImGui.pushStyleVar(ImGuiStyleVar.WindowPadding, 10f, 6f);
+        ImGui.pushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
+        ImGui.begin("##BottomPlaybackBar", flags);
+
+        ImDrawList dl = ImGui.getWindowDrawList();
+        dl.addLine(x, y, x + w, y, ImGui.getColorU32(0.20f, 0.24f, 0.30f, 0.9f), 1.0f);
+
+        float cy = y + h * 0.5f;
+        int colIcon = ImGui.getColorU32(0.92f, 0.94f, 0.98f, 1.0f);
+        int colMutedIcon = ImGui.getColorU32(0.95f, 0.42f, 0.42f, 1.0f);
+
+        // Left: Speaker Mute button + Volume slider
+        ImGui.setCursorScreenPos(x + 10f, cy - 16f);
+        if (ImGui.invisibleButton("##BarMuteBtn", 30f, 32f)) {
+            audioEngine.setMuted(!audioEngine.isMuted());
+        }
+        if (ImGui.isItemHovered()) {
+            ImGui.setTooltip(audioEngine.isMuted() ? "Unmute" : "Mute");
+        }
+        float spkX = ImGui.getItemRectMinX() + 14f;
+        float spkY = ImGui.getItemRectMinY() + 16f;
+        int spkCol = audioEngine.isMuted() ? colMutedIcon : colIcon;
+        dl.addRectFilled(spkX - 7f, spkY - 3f, spkX - 2f, spkY + 3f, spkCol);
+        dl.addTriangleFilled(spkX - 3f, spkY - 3f, spkX + 4f, spkY - 7f, spkX + 4f, spkY + 7f, spkCol);
+        if (audioEngine.isMuted()) {
+            dl.addLine(spkX + 6f, spkY - 4f, spkX + 12f, spkY + 4f, spkCol, 2.0f);
+            dl.addLine(spkX + 12f, spkY - 4f, spkX + 6f, spkY + 4f, spkCol, 2.0f);
+        }
+
+        ImGui.setCursorScreenPos(x + 44f, cy - 11f);
+        volumeTmp[0] = audioEngine.getVolume() * 100.0f;
+        ImGui.setNextItemWidth(84f);
+        if (ImGui.sliderFloat("##BarVolume", volumeTmp, 0f, 100f, "%.0f%%")) {
+            audioEngine.setVolume(volumeTmp[0] / 100.0f);
+        }
+
+        // Right: Prev | Play/Pause | Next | ... transport cluster
+        float rightGroupW = 176f;
+        float rightX = x + w - rightGroupW - 10f;
+        if (renderTransportVectorBtn(dl, "##BarPrev", rightX, cy - 17f, 36f, 34f, "Previous Track",
+                (bx, by) -> {
+                    dl.addRectFilled(bx - 7f, by - 6f, bx - 5f, by + 6f, colIcon);
+                    dl.addTriangleFilled(bx - 4f, by, bx + 6f, by - 6f, bx + 6f, by + 6f, colIcon);
+                })) {
+            playPrevInQueue();
+        }
+        if (renderTransportVectorBtn(dl, "##BarPlayPause", rightX + 42f, cy - 17f, 38f, 34f,
+                audioEngine.isAudioPlaying() ? "Pause" : "Play",
+                (bx, by) -> {
+                    if (audioEngine.isAudioPlaying()) {
+                        dl.addRectFilled(bx - 6f, by - 7f, bx - 1.5f, by + 7f, colIcon, 1f);
+                        dl.addRectFilled(bx + 1.5f, by - 7f, bx + 6f, by + 7f, colIcon, 1f);
+                    } else {
+                        dl.addTriangleFilled(bx - 5f, by - 8f, bx - 5f, by + 8f, bx + 8f, by, colIcon);
+                    }
+                })) {
+            if (audioEngine.hasAudioLoaded()) {
+                audioEngine.setPlaying(!audioEngine.isAudioPlaying());
+            } else if (!playbackQueue.isEmpty()) {
+                playQueue(playbackQueue, Math.max(0, playbackQueueIndex));
+            } else {
+                pickAndLoadAudio();
+            }
+        }
+        if (renderTransportVectorBtn(dl, "##BarNext", rightX + 86f, cy - 17f, 36f, 34f, "Next Track",
+                (bx, by) -> {
+                    dl.addTriangleFilled(bx - 6f, by - 6f, bx - 6f, by + 6f, bx + 4f, by, colIcon);
+                    dl.addRectFilled(bx + 5f, by - 6f, bx + 7f, by + 6f, colIcon);
+                })) {
+            playNextInQueue();
+        }
+        if (renderTransportVectorBtn(dl, "##BarMore", rightX + 128f, cy - 17f, 36f, 34f, "Playback Options",
+                (bx, by) -> {
+                    dl.addCircleFilled(bx - 6f, by, 2.0f, colIcon, 8);
+                    dl.addCircleFilled(bx, by, 2.0f, colIcon, 8);
+                    dl.addCircleFilled(bx + 6f, by, 2.0f, colIcon, 8);
+                })) {
+            ImGui.openPopup("##BarOptionsPopup");
+        }
+        if (ImGui.beginPopup("##BarOptionsPopup")) {
+            if (ImGui.menuItem("Load Song File...")) {
+                pickAndLoadAudio();
+            }
+            if (ImGui.menuItem("Loop Current Track", null, loopSingleTrack)) {
+                loopSingleTrack = !loopSingleTrack;
+            }
+            ImGui.separator();
+            if (ImGui.menuItem("Open Media Library")) {
+                activePage = AppPage.LIBRARY;
+            }
+            if (ImGui.menuItem("Open Visualizer")) {
+                activePage = AppPage.VISUALIZER;
+            }
+            ImGui.endPopup();
+        }
+
+        // Center: Progress Slider + Duration + Timestamp Jump + Track Title
+        float centerX = x + 140f;
+        float centerRight = rightX - 16f;
+        float centerW = Math.max(180f, centerRight - centerX);
+        long durMs = audioEngine.getDurationMs();
+        long posMs = audioEngine.getPositionMs();
+
+        String posStr = formatTimestamp(posMs);
+        String durStr = formatTimestamp(durMs);
+        float row1Y = y + 9f;
+        dl.addText(centerX, row1Y + 2f, ImGui.getColorU32(0.58f, 0.62f, 0.68f, 1.0f), posStr);
+
+        float durTextW = ImGui.calcTextSize(durStr).x;
+        float jumpBoxW = 66f;
+        float seekX = centerX + ImGui.calcTextSize(posStr).x + 10f;
+        float seekEnd = centerX + centerW - durTextW - jumpBoxW - 18f;
+        float seekW = Math.max(60f, seekEnd - seekX);
+
+        ImGui.setCursorScreenPos(seekX, row1Y);
+        seekTmp[0] = posMs / 1000f;
+        float maxSec = Math.max(1f, durMs / 1000f);
+        ImGui.setNextItemWidth(seekW);
+        if (ImGui.sliderFloat("##BarSeek", seekTmp, 0f, maxSec, "")) {
+            audioEngine.seekMs((long) (seekTmp[0] * 1000f));
+        }
+
+        dl.addText(seekX + seekW + 8f, row1Y + 2f, ImGui.getColorU32(0.58f, 0.62f, 0.68f, 1.0f), durStr);
+
+        if (!timestampEditing) {
+            timestampEditBuf.set(posStr);
+        }
+        ImGui.setCursorScreenPos(centerX + centerW - jumpBoxW, row1Y);
+        ImGui.setNextItemWidth(jumpBoxW);
+        int tsFlags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
+        boolean tsEntered = ImGui.inputText("##jumpTs", timestampEditBuf, tsFlags);
+        if (ImGui.isItemActivated()) {
+            timestampEditing = true;
+        }
+        if (ImGui.isItemHovered() && !ImGui.isItemActive()) {
+            ImGui.setTooltip("Type timestamp (m:ss, h:mm:ss, or seconds) and press Enter/Tab");
+        }
+        if (timestampEditing) {
+            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
+            boolean tab = (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
+                    && ImGui.isKeyPressed(ImGuiKey.Tab, false);
+            boolean deactivated = ImGui.isItemDeactivated();
+            if (esc) {
+                timestampEditing = false;
+                timestampEditBuf.set(posStr);
+            } else if (tsEntered || tab || deactivated) {
+                long targetMs = parseTimestampMs(timestampEditBuf.get(), durMs);
+                if (targetMs >= 0L && audioEngine.hasAudioLoaded()) {
+                    audioEngine.seekMs(targetMs);
+                    statusMessage = "Seeked to " + formatTimestamp(audioEngine.getPositionMs());
+                }
+                timestampEditing = false;
+            }
+        }
+
+        // Row 2 under slider: track title + queue info
+        float row2Y = y + 38f;
+        String title = audioEngine.hasAudioLoaded() ? audioEngine.getTitle() : "unknown";
+        String queueNote = (!playbackQueue.isEmpty() && playbackQueueIndex >= 0)
+                ? (title + "   •   " + (playbackQueueIndex + 1) + "/" + playbackQueue.size())
+                : title;
+        dl.pushClipRect(centerX, row2Y, centerRight, y + h - 4f, true);
+        dl.addText(centerX, row2Y, ImGui.getColorU32(0.76f, 0.80f, 0.85f, 1.0f), queueNote);
+        dl.popClipRect();
+
+        ImGui.end();
+        ImGui.popStyleVar(2);
+        ImGui.popStyleColor();
+    }
+
+    private interface VectorGlyph {
+        void draw(float cx, float cy);
+    }
+
+    private boolean renderTransportVectorBtn(ImDrawList dl, String uid, float x, float y, float w, float h,
+                                             String tooltip, VectorGlyph glyph) {
+        ImGui.setCursorScreenPos(x, y);
+        boolean clicked = ImGui.invisibleButton(uid, w, h);
+        if (ImGui.isItemHovered()) {
+            dl.addRectFilled(x, y, x + w, y + h, ImGui.getColorU32(0.22f, 0.27f, 0.34f, 0.75f), 6f);
+            ImGui.setTooltip(tooltip);
+        }
+        glyph.draw(x + w * 0.5f, y + h * 0.5f);
+        return clicked;
+    }
+
+    private void trackAndSnapFloatingWindow(String windowId, float boundX, float boundY, float boundW, float boundH,
+                                            boolean mouseReleased) {
+        if (ImGui.isWindowDocked()) {
+            floatingWindowRects.remove(windowId);
+            movedFloatingWindows.remove(windowId);
+            return;
+        }
+        float wx = ImGui.getWindowPosX();
+        float wy = ImGui.getWindowPosY();
+        float ww = ImGui.getWindowSizeX();
+        float wh = ImGui.getWindowSizeY();
+        float[] prev = floatingWindowRects.get(windowId);
+        if (ImGui.isMouseDown(0) && prev != null
+                && (Math.abs(wx - prev[0]) > 0.5f || Math.abs(wy - prev[1]) > 0.5f)) {
+            movedFloatingWindows.add(windowId);
+        }
+        if (mouseReleased && movedFloatingWindows.remove(windowId)) {
+            List<float[]> others = new ArrayList<>();
+            for (java.util.Map.Entry<String, float[]> entry : floatingWindowRects.entrySet()) {
+                if (!entry.getKey().equals(windowId)) {
+                    others.add(entry.getValue());
+                }
+            }
+            float[] snapped = snapFloatingWindowRect(wx, wy, ww, wh, boundX, boundY, boundW, boundH, others, 16.0f);
+            if (Math.abs(snapped[0] - wx) > 0.5f || Math.abs(snapped[1] - wy) > 0.5f) {
+                ImGui.setWindowPos(snapped[0], snapped[1]);
+                wx = snapped[0];
+                wy = snapped[1];
+            }
+        }
+        floatingWindowRects.put(windowId, new float[]{wx, wy, ww, wh});
+    }
+
+    public static float[] snapFloatingWindowRect(float x, float y, float w, float h,
+                                                 float boundX, float boundY, float boundW, float boundH,
+                                                 List<float[]> otherRects, float thresholdPx) {
+        float bestX = x;
+        float bestDxAbs = thresholdPx + 1.0f;
+        float[] edgeXs = {boundX, boundX + boundW - w};
+        for (float targetX : edgeXs) {
+            float d = Math.abs(x - targetX);
+            if (d <= thresholdPx && d < bestDxAbs) {
+                bestDxAbs = d;
+                bestX = targetX;
+            }
+        }
+
+        float bestY = y;
+        float bestDyAbs = thresholdPx + 1.0f;
+        float[] edgeYs = {boundY, boundY + boundH - h};
+        for (float targetY : edgeYs) {
+            float d = Math.abs(y - targetY);
+            if (d <= thresholdPx && d < bestDyAbs) {
+                bestDyAbs = d;
+                bestY = targetY;
+            }
+        }
+
+        if (otherRects != null) {
+            for (float[] o : otherRects) {
+                if (o == null || o.length < 4) continue;
+                float ox = o[0], oy = o[1], ow = o[2], oh = o[3];
+                if (y < oy + oh + thresholdPx && y + h > oy - thresholdPx) {
+                    float[] candidatesX = {ox + ow, ox - w, ox, ox + ow - w};
+                    for (float targetX : candidatesX) {
+                        float d = Math.abs(x - targetX);
+                        if (d <= thresholdPx && d < bestDxAbs) {
+                            bestDxAbs = d;
+                            bestX = targetX;
+                        }
+                    }
+                }
+                if (x < ox + ow + thresholdPx && x + w > ox - thresholdPx) {
+                    float[] candidatesY = {oy + oh, oy - h, oy, oy + oh - h};
+                    for (float targetY : candidatesY) {
+                        float d = Math.abs(y - targetY);
+                        if (d <= thresholdPx && d < bestDyAbs) {
+                            bestDyAbs = d;
+                            bestY = targetY;
+                        }
+                    }
+                }
+            }
+        }
+
+        float maxX = Math.max(boundX, boundX + boundW - Math.min(w, 80f));
+        float maxY = Math.max(boundY, boundY + boundH - 32f);
+        float finalX = Math.max(boundX, Math.min(maxX, bestX));
+        float finalY = Math.max(boundY, Math.min(maxY, bestY));
+        return new float[]{finalX, finalY};
+    }
+
+    private void syncPlaybackQueueAdvance() {
+        if (audioEngine == null) return;
+        long completed = audioEngine.getCompletedCount();
+        if (completed != lastObservedCompletedCount) {
+            lastObservedCompletedCount = completed;
+            if (!loopSingleTrack && playbackQueue.size() > 1 && playbackQueueIndex >= 0) {
+                playNextInQueue();
+            }
+        }
+    }
+
+    private void playQueue(List<File> tracks, int startIndex) {
+        if (tracks == null || tracks.isEmpty()) return;
+        playbackQueue.clear();
+        for (File f : tracks) {
+            if (f != null) playbackQueue.add(f);
+        }
+        if (playbackQueue.isEmpty()) {
+            playbackQueueIndex = -1;
+            return;
+        }
+        int idx = Math.max(0, Math.min(playbackQueue.size() - 1, startIndex));
+        loadQueueTrackAt(idx);
+    }
+
+    private void enqueueTracks(List<File> tracks) {
+        if (tracks == null || tracks.isEmpty()) return;
+        int added = 0;
+        for (File f : tracks) {
+            if (f != null) {
+                playbackQueue.add(f);
+                added++;
+            }
+        }
+        if (added > 0) {
+            statusMessage = "Enqueued " + added + (added == 1 ? " track" : " tracks");
+            if (!audioEngine.hasAudioLoaded()) {
+                loadQueueTrackAt(0);
+            }
+        }
+    }
+
+    private void playNextInQueue() {
+        if (playbackQueue.isEmpty()) {
+            if (audioEngine.hasAudioLoaded()) {
+                audioEngine.seekMs(0L);
+            }
+            return;
+        }
+        int next = (playbackQueueIndex + 1) % playbackQueue.size();
+        loadQueueTrackAt(next);
+    }
+
+    private void playPrevInQueue() {
+        if (playbackQueue.isEmpty() || audioEngine.getPositionMs() > 3000L) {
+            if (audioEngine.hasAudioLoaded()) {
+                audioEngine.seekMs(0L);
+            }
+            return;
+        }
+        int prev = (playbackQueueIndex - 1 + playbackQueue.size()) % playbackQueue.size();
+        loadQueueTrackAt(prev);
+    }
+
+    private void loadQueueTrackAt(int idx) {
+        if (idx < 0 || idx >= playbackQueue.size()) return;
+        File f = playbackQueue.get(idx);
+        playbackQueueIndex = idx;
+        if (audioEngine.loadAudioFile(f)) {
+            lastObservedCompletedCount = audioEngine.getCompletedCount();
+            statusMessage = "Playing: " + audioEngine.getTitle();
+        } else {
+            statusMessage = "Failed to load: " + f.getName();
+        }
     }
 
     private void renderTemplatePickerModal() {
@@ -624,8 +1254,33 @@ public class AveeEditorApp extends Application implements SceneHost {
                 if (ImGui.menuItem(audioEngine.isAudioPlaying() ? "Pause Audio" : "Play Audio", null, false, audioEngine.hasAudioLoaded())) {
                     audioEngine.setPlaying(!audioEngine.isAudioPlaying());
                 }
-                if (ImGui.menuItem("Synthetic Test Signal", null, audioEngine.isSyntheticBeat())) {
-                    audioEngine.setSyntheticBeat(!audioEngine.isSyntheticBeat());
+                ImGui.endMenu();
+            }
+
+            if (ImGui.beginMenu("View")) {
+                if (ImGui.menuItem("Library Page", null, activePage == AppPage.LIBRARY)) {
+                    activePage = AppPage.LIBRARY;
+                }
+                if (ImGui.menuItem("Visualizer Page", null, activePage == AppPage.VISUALIZER)) {
+                    activePage = AppPage.VISUALIZER;
+                }
+                ImGui.separator();
+                ImGui.menuItem("Scene Hierarchy", null, showSceneHierarchy);
+                ImGui.menuItem("Property Inspector", null, showPropertyInspector);
+                if (ImGui.menuItem("Templates Gallery...")) {
+                    templatePicker.open();
+                }
+                ImGui.separator();
+                if (ImGui.menuItem("Reset Preview Zoom")) {
+                    previewZoom = 1.0f;
+                    previewPanX = 0.0f;
+                    previewPanY = 0.0f;
+                }
+                if (ImGui.menuItem("Reset Panel Layout")) {
+                    activePage = AppPage.VISUALIZER;
+                    showSceneHierarchy.set(true);
+                    showPropertyInspector.set(true);
+                    requestResetDockLayout = true;
                 }
                 ImGui.endMenu();
             }
@@ -919,9 +1574,10 @@ public class AveeEditorApp extends Application implements SceneHost {
         }
     }
 
-    private void renderPreviewAndTransportPanel() {
+    private void renderPreviewViewportPanel() {
         // Top preview controls bar
-        if (ImGui.combo("Resolution##res", resCombo, RESOLUTION_LABELS)) {
+        ImGui.setNextItemWidth(165f);
+        if (ImGui.combo("##res", resCombo, RESOLUTION_LABELS)) {
             int[] res = RESOLUTIONS[resCombo.get()];
             previewW = res[0];
             previewH = res[1];
@@ -932,7 +1588,28 @@ public class AveeEditorApp extends Application implements SceneHost {
             audioEngine.setHighQualityBlur(hqBlurChk.get());
         }
         ImGui.sameLine();
-        ImGui.textDisabled("FPS: " + rendererCore.getFrameStats().fps);
+        if (ImGui.smallButton("-##zoomOut")) {
+            previewZoom = clampPreviewZoom(previewZoom / 1.25f);
+            if (previewZoom <= 1.0f) {
+                previewPanX = 0.0f;
+                previewPanY = 0.0f;
+            }
+        }
+        ImGui.sameLine();
+        if (ImGui.smallButton(Math.round(previewZoom * 100.0f) + "%##zoomReset")) {
+            previewZoom = 1.0f;
+            previewPanX = 0.0f;
+            previewPanY = 0.0f;
+        }
+        if (ImGui.isItemHovered()) {
+            ImGui.setTooltip("Mouse wheel over preview to zoom, drag inside canvas to pan, double-click/click % to reset");
+        }
+        ImGui.sameLine();
+        if (ImGui.smallButton("+##zoomIn")) {
+            previewZoom = clampPreviewZoom(previewZoom * 1.25f);
+        }
+        ImGui.sameLine();
+        ImGui.textDisabled("FPS:" + rendererCore.getFrameStats().fps);
         ImGui.sameLine();
         if (ImGui.button("Templates...")) {
             templatePicker.open();
@@ -942,90 +1619,87 @@ public class AveeEditorApp extends Application implements SceneHost {
             exportDialog.openDialog(audioEngine);
         }
 
-        float transportH = 72f;
         float availW = Math.max(64f, ImGui.getContentRegionAvailX());
-        float availH = Math.max(64f, ImGui.getContentRegionAvailY() - transportH);
+        float availH = Math.max(64f, ImGui.getContentRegionAvailY());
 
-        float aspect = (float) previewW / (float) Math.max(1, previewH);
-        float drawW = availW;
-        float drawH = drawW / aspect;
-        if (drawH > availH) {
-            drawH = availH;
-            drawW = drawH * aspect;
-        }
-        float padX = Math.max(0f, (availW - drawW) * 0.5f);
-        float padY = Math.max(0f, (availH - drawH) * 0.5f);
-        if (padX > 0f) ImGui.setCursorPosX(ImGui.getCursorPosX() + padX);
-        if (padY > 0f) ImGui.setCursorPosY(ImGui.getCursorPosY() + padY);
+        ImGui.pushStyleVar(ImGuiStyleVar.WindowPadding, 0f, 0f);
+        ImGui.beginChild("##PreviewViewportCanvas", availW, availH, true,
+                ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoMove);
+        float canvasX0 = ImGui.getCursorScreenPosX();
+        float canvasY0 = ImGui.getCursorScreenPosY();
+        float cW = Math.max(64f, ImGui.getContentRegionAvailX());
+        float cH = Math.max(64f, ImGui.getContentRegionAvailY());
 
-        // Flip V (0 -> 1 bottom-to-top) for OpenGL FBO texture orientation in ImGui
-        ImGui.image(previewTex, drawW, drawH, 0f, 1f, 1f, 0f);
+        // Exclusive hit item prevents parent window from dragging when panning inside preview
+        ImGui.invisibleButton("##PreviewCanvasHit", cW, cH);
+        float[] fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
+        float drawW = fitRect[2];
+        float drawH = fitRect[3];
 
-        // Bottom Audio Transport bar
-        ImGui.setCursorPosY(ImGui.getWindowHeight() - transportH);
-        ImGui.separator();
-        if (ImGui.button("Load Song...")) {
-            pickAndLoadAudio();
-        }
-        ImGui.sameLine();
-        if (audioEngine.hasAudioLoaded()) {
-            if (ImGui.button(audioEngine.isAudioPlaying() ? "Pause" : "Play")) {
-                audioEngine.setPlaying(!audioEngine.isAudioPlaying());
-            }
-            ImGui.sameLine();
-        }
-        muteChk.set(audioEngine.isMuted());
-        if (ImGui.checkbox("Mute", muteChk)) {
-            audioEngine.setMuted(muteChk.get());
-        }
-        ImGui.sameLine();
-        synthChk.set(audioEngine.isSyntheticBeat());
-        if (ImGui.checkbox("Test Signal", synthChk)) {
-            audioEngine.setSyntheticBeat(synthChk.get());
-        }
-        ImGui.sameLine();
-        ImGui.text(audioEngine.getTitle());
-
-        long durMs = audioEngine.getDurationMs();
-        long posMs = audioEngine.getPositionMs();
-        seekTmp[0] = posMs / 1000f;
-        float maxSec = Math.max(1f, durMs / 1000f);
-        ImGui.setNextItemWidth(-190f);
-        if (ImGui.sliderFloat("##seek", seekTmp, 0f, maxSec, formatTimestamp(posMs))) {
-            audioEngine.seekMs((long) (seekTmp[0] * 1000f));
-        }
-        ImGui.sameLine();
-        if (!timestampEditing) {
-            timestampEditBuf.set(formatTimestamp(posMs));
-        }
-        ImGui.setNextItemWidth(76f);
-        int tsFlags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
-        boolean tsEntered = ImGui.inputText("##jumpTs", timestampEditBuf, tsFlags);
-        if (ImGui.isItemActivated()) {
-            timestampEditing = true;
-        }
-        if (ImGui.isItemHovered() && !ImGui.isItemActive()) {
-            ImGui.setTooltip("Type timestamp (m:ss, h:mm:ss, or seconds) and press Enter/Tab");
-        }
-        if (timestampEditing) {
-            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
-            boolean tab = (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
-                    && ImGui.isKeyPressed(ImGuiKey.Tab, false);
-            boolean deactivated = ImGui.isItemDeactivated();
-            if (esc) {
-                timestampEditing = false;
-                timestampEditBuf.set(formatTimestamp(posMs));
-            } else if (tsEntered || tab || deactivated) {
-                long targetMs = parseTimestampMs(timestampEditBuf.get(), durMs);
-                if (targetMs >= 0L && audioEngine.hasAudioLoaded()) {
-                    audioEngine.seekMs(targetMs);
-                    statusMessage = "Seeked to " + formatTimestamp(audioEngine.getPositionMs());
+        if (!inspector.getColorPicker().isActive()) {
+            if (ImGui.isItemHovered()) {
+                float wheel = ImGui.getIO().getMouseWheel();
+                if (Math.abs(wheel) > 0.01f) {
+                    float factor = wheel > 0.0f ? 1.15f : (1.0f / 1.15f);
+                    previewZoom = clampPreviewZoom(previewZoom * factor);
+                    fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
+                    drawW = fitRect[2];
+                    drawH = fitRect[3];
+                    previewPanX = clampPreviewPan(previewPanX, cW, drawW);
+                    previewPanY = clampPreviewPan(previewPanY, cH, drawH);
                 }
-                timestampEditing = false;
+                if (ImGui.isMouseDoubleClicked(0)) {
+                    previewZoom = 1.0f;
+                    previewPanX = 0.0f;
+                    previewPanY = 0.0f;
+                }
+            }
+            if ((ImGui.isItemActive() && ImGui.isMouseDragging(0, 1.0f))
+                    || (ImGui.isItemHovered() && ImGui.isMouseDragging(2, 1.0f))) {
+                previewPanX = clampPreviewPan(previewPanX + ImGui.getIO().getMouseDeltaX(), cW, drawW);
+                previewPanY = clampPreviewPan(previewPanY + ImGui.getIO().getMouseDeltaY(), cH, drawH);
             }
         }
-        ImGui.sameLine();
-        ImGui.text("/ " + formatTimestamp(durMs));
+
+        fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
+        ImDrawList dl = ImGui.getWindowDrawList();
+        dl.pushClipRect(canvasX0, canvasY0, canvasX0 + cW, canvasY0 + cH, true);
+        dl.addRectFilled(canvasX0, canvasY0, canvasX0 + cW, canvasY0 + cH, ImGui.getColorU32(0.05f, 0.06f, 0.08f, 1.0f));
+        // Flip V (0 -> 1 bottom-to-top) for OpenGL FBO texture orientation in ImGui
+        dl.addImage(previewTex,
+                canvasX0 + fitRect[0], canvasY0 + fitRect[1],
+                canvasX0 + fitRect[0] + fitRect[2], canvasY0 + fitRect[1] + fitRect[3],
+                0f, 1f, 1f, 0f);
+        dl.popClipRect();
+        ImGui.endChild();
+        ImGui.popStyleVar();
+    }
+
+    public static float clampPreviewZoom(float z) {
+        return Math.max(0.25f, Math.min(8.0f, z));
+    }
+
+    public static float clampPreviewPan(float pan, float canvasDim, float drawDim) {
+        float maxPan = Math.max(canvasDim * 0.45f, drawDim * 0.45f);
+        return Math.max(-maxPan, Math.min(maxPan, pan));
+    }
+
+    public static float[] computeZoomedPreviewRect(float canvasW, float canvasH,
+                                                   int previewW, int previewH,
+                                                   float zoom, float panX, float panY) {
+        float aspect = (float) Math.max(1, previewW) / (float) Math.max(1, previewH);
+        float fitW = canvasW;
+        float fitH = fitW / aspect;
+        if (fitH > canvasH) {
+            fitH = canvasH;
+            fitW = fitH * aspect;
+        }
+        float z = clampPreviewZoom(zoom);
+        float drawW = fitW * z;
+        float drawH = fitH * z;
+        float offX = ((canvasW - drawW) * 0.5f) + panX;
+        float offY = ((canvasH - drawH) * 0.5f) + panY;
+        return new float[]{offX, offY, drawW, drawH};
     }
 
     public static String formatTimestamp(long ms) {
@@ -1718,11 +2392,7 @@ public class AveeEditorApp extends Application implements SceneHost {
                 "Audio Files (*.mp3, *.wav, *.flac, *.ogg, *.m4a)");
         if (f != null) {
             statusMessage = "Decoding " + f.getName() + "...";
-            if (audioEngine.loadAudioFile(f)) {
-                statusMessage = "Playing " + f.getName();
-            } else {
-                statusMessage = "Failed to decode " + f.getName() + " (requires ffmpeg)";
-            }
+            playQueue(java.util.Collections.singletonList(f), 0);
         }
     }
 
