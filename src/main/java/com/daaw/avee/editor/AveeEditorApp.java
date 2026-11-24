@@ -235,6 +235,11 @@ public class AveeEditorApp extends Application implements SceneHost {
             }
         }
 
+        // Sample hovered screen/window pixel patch for eyedropper while front buffer holds clean frame
+        if (inspector.getColorPicker().isActive()) {
+            inspector.getColorPicker().captureFrontBufferPatch(GLFW.glfwGetCurrentContext());
+        }
+
         // Run main-thread callbacks (e.g. image decode results), drain MCP requests, and tick clock
         Looper.drainMainQueue();
         mcpBridge.drainUiTasks();
@@ -358,6 +363,10 @@ public class AveeEditorApp extends Application implements SceneHost {
         exportDialog.render(currentScene, rendererCore, audioEngine, previewW, previewH);
         renderAboutDialog();
         renderUpdateDialog();
+        inspector.getColorPicker().renderOverlay(() -> {
+            applySceneChanges(true);
+            statusMessage = "Picked color from screen";
+        });
     }
 
     private void renderMainMenuBar() {
@@ -889,6 +898,7 @@ public class AveeEditorApp extends Application implements SceneHost {
     }
 
     private void loadBuiltInPreset(int idx) {
+        inspector.getColorPicker().cancel();
         try {
             currentScene = VizArchiveManager.loadPreset(idx);
             currentProjectFile = null;
@@ -905,6 +915,7 @@ public class AveeEditorApp extends Application implements SceneHost {
     }
 
     private void loadTemplateFile(File f) {
+        inspector.getColorPicker().cancel();
         try {
             currentScene = VizArchiveManager.loadFile(f);
             currentProjectFile = f;

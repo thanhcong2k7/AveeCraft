@@ -925,6 +925,9 @@ public class EditorVerifier {
         // Part 4 verification: Manual timestamp parse/seek & spectrum/measure freeze on pause
         verifyPart4SeekAndPauseFreeze();
 
+        // Part 5 verification: Screen color picker GL patch read, loupe right-of-cursor placement & property writeback
+        verifyPart5ScreenColorPicker(w, h, fbo);
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);
@@ -1357,5 +1360,110 @@ public class EditorVerifier {
         }
         eng.shutdown();
         System.out.println("Part 4 verification OK (manual timestamp parse/seek + pause spectrum/waveform/shake freeze OK)");
+    }
+
+    private static void verifyPart5ScreenColorPicker(int w, int h, int fbo) {
+        int prevFbo = GL11.glGetInteger(GL30.GL_FRAMEBUFFER_BINDING);
+        try {
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
+            GL11.glViewport(0, 0, w, h);
+            GL11.glEnable(GL11.GL_SCISSOR_TEST);
+
+            int cx = w / 2;
+            int cy = h / 2;
+            // Background black
+            GL11.glScissor(0, 0, w, h);
+            GL11.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
+
+            // Top-left inside patch (higher fbY = higher on screen): pure Red
+            GL11.glScissor(cx - 3, cy + 3, 1, 1);
+            GL11.glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+            GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
+
+            // Center pixel: Emerald (34, 180, 95)
+            GL11.glScissor(cx, cy, 1, 1);
+            GL11.glClearColor(34 / 255.0f, 180 / 255.0f, 95 / 255.0f, 1.0f);
+            GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
+
+            // Right neighbor (+2, 0): Yellow (240, 220, 40)
+            GL11.glScissor(cx + 2, cy, 1, 1);
+            GL11.glClearColor(240 / 255.0f, 220 / 255.0f, 40 / 255.0f, 1.0f);
+            GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
+
+            // Bottom-right inside patch (+3, -3 GL -> lower on screen): Blue (20, 60, 250)
+            GL11.glScissor(cx + 3, cy - 3, 1, 1);
+            GL11.glClearColor(20 / 255.0f, 60 / 255.0f, 250 / 255.0f, 1.0f);
+            GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
+
+            GL11.glDisable(GL11.GL_SCISSOR_TEST);
+
+            int size = ScreenColorPicker.PATCH_SIZE;
+            int r = ScreenColorPicker.PATCH_RADIUS;
+            int[] patch = new int[size * size];
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocateDirect(size * size * 4)
+                    .order(java.nio.ByteOrder.nativeOrder());
+            int center = ScreenColorPicker.readGlPatch(fbo, 0, cx, cy, w, h, r, patch, buf);
+
+            int cr = (center >> 16) & 0xFF;
+            int cg = (center >> 8) & 0xFF;
+            int cb = center & 0xFF;
+            if (Math.abs(cr - 34) > 2 || Math.abs(cg - 180) > 2 || Math.abs(cb - 95) > 2) {
+                throw new AssertionError("Center sampled pixel mismatch: rgb=(" + cr + "," + cg + "," + cb + ")");
+            }
+            int topLeft = patch[(r - 3) * size + (r - 3)];
+            int rightPx = patch[r * size + (r + 2)];
+            int botRight = patch[(r + 3) * size + (r + 3)];
+            if (((topLeft >> 16) & 0xFF) < 250 || ((topLeft >> 8) & 0xFF) > 5) {
+                throw new AssertionError("Top-left Y-flipped patch pixel mismatch: 0x" + Integer.toHexString(topLeft));
+            }
+            if (((rightPx >> 16) & 0xFF) < 235 || ((rightPx >> 8) & 0xFF) < 215 || (rightPx & 0xFF) > 45) {
+                throw new AssertionError("Right neighbor patch pixel mismatch: 0x" + Integer.toHexString(rightPx));
+            }
+            if ((botRight & 0xFF) < 245 || ((botRight >> 16) & 0xFF) > 25) {
+                throw new AssertionError("Bottom-right patch pixel mismatch: 0x" + Integer.toHexString(botRight));
+            }
+
+            // Loupe preview window placement: strictly right of cursor when space available, clamped at edge
+            float[] norm = ScreenColorPicker.computeLoupeRect(400f, 350f, 0f, 0f, 1500f, 880f, 160f, 200f);
+            if (norm[0] <= 400f || Math.abs(norm[1] - 250f) > 1e-3f) {
+                throw new AssertionError("Expected loupe right of cursor: " + java.util.Arrays.toString(norm));
+            }
+            float[] edge = ScreenColorPicker.computeLoupeRect(1460f, 860f, 0f, 0f, 1500f, 880f, 160f, 200f);
+            if (edge[0] + edge[2] > 1500f || edge[1] + edge[3] > 880f || edge[0] < 4f) {
+                throw new AssertionError("Loupe edge clamping failed: " + java.util.Arrays.toString(edge));
+            }
+
+            // Property writeback across crgba (preserving alpha), crgb, crgba4f, chsla4f
+            CustomPropertiesList props = new CustomPropertiesList(0, new org.json.JSONObject(), null);
+            props.putPropertyIntAsCRGBA("colRgba", 0x80000000, "c");
+            props.putPropertyIntAsCRGB("colRgb", 0xFF000000, "c");
+            props.putPropertyArray4fValue("col4f", new float[]{0f, 0f, 0f, 0.5f});
+            props.putPropertyArray4fValue("colHsla", new float[]{0f, 0f, 0f, 0.5f});
+
+            if (!ScreenColorPicker.applyPickedColor(props, "colRgba", "crgba", center, 0.5f)
+                    || !ScreenColorPicker.applyPickedColor(props, "colRgb", "crgb", center, 0.5f)
+                    || !ScreenColorPicker.applyPickedColor(props, "col4f", "crgba4f", center, 0.5f)
+                    || !ScreenColorPicker.applyPickedColor(props, "colHsla", "chsla4f", center, 0.5f)) {
+                throw new AssertionError("applyPickedColor returned false");
+            }
+            int savedRgba = props.getPropertyInt("colRgba", 0);
+            int savedRgb = props.getPropertyInt("colRgb", 0);
+            if (Math.abs(((savedRgba >> 24) & 0xFF) - 128) > 2 || (savedRgba & 0x00FFFFFF) != (center & 0x00FFFFFF)) {
+                throw new AssertionError("crgba writeback mismatch: 0x" + Integer.toHexString(savedRgba));
+            }
+            if (((savedRgb >> 24) & 0xFF) != 255 || (savedRgb & 0x00FFFFFF) != (center & 0x00FFFFFF)) {
+                throw new AssertionError("crgb writeback mismatch: 0x" + Integer.toHexString(savedRgb));
+            }
+            float[] savedHsla = props.getPropertyArray4f("colHsla", new float[4]);
+            float[] backF4 = new float[4];
+            com.daaw.avee.comp.Visualizer.Graphic.GraphicsUtils.hlsa1ColorToF4Color(savedHsla, backF4);
+            if (Math.abs(backF4[0] * 255f - cr) > 3f || Math.abs(backF4[1] * 255f - cg) > 3f || Math.abs(backF4[2] * 255f - cb) > 3f) {
+                throw new AssertionError("chsla4f round-trip mismatch: " + java.util.Arrays.toString(backF4));
+            }
+        } finally {
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, prevFbo);
+        }
+        System.out.println("Part 5 verification OK (eyedropper GL patch, right-side loupe & color property writeback OK)");
     }
 }

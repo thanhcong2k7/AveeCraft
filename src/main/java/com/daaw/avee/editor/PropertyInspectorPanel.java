@@ -71,6 +71,11 @@ public class PropertyInspectorPanel {
     private final List<String> lastFrameFieldUids = new ArrayList<>();
     private CustomScene activeScene = null;
     private final float[] rowBounds = new float[3];
+    private final ScreenColorPicker colorPicker = new ScreenColorPicker();
+
+    public ScreenColorPicker getColorPicker() {
+        return colorPicker;
+    }
 
     private void beginPropertyRowBg() {
         float minX = ImGui.getCursorScreenPosX() - 4.0f;
@@ -276,57 +281,11 @@ public class PropertyInspectorPanel {
             }
         }
 
-        if ("crgba".equals(kind) || "crgb".equals(kind) || "crgb_hl".equals(kind)) {
+        if ("crgba".equals(kind) || "crgb".equals(kind) || "crgb_hl".equals(kind)
+                || "chsla4f".equals(kind) || "chsl4f".equals(kind) || "crgba4f".equals(kind) || "crgb4f".equals(kind)) {
             beginPropertyRowBg();
             try {
-                int argb = props.getPropertyInt(key, -1);
-                GraphicsUtils.intColorToF4Color(tmpColor4, argb);
-                if ("crgba".equals(kind)) {
-                    if (ImGui.colorEdit4(key, tmpColor4)) {
-                        props.putPropertyIntValue(key, GraphicsUtils.f4ColorToIntColor(tmpColor4));
-                        return true;
-                    }
-                } else {
-                    tmpColor3[0] = tmpColor4[0];
-                    tmpColor3[1] = tmpColor4[1];
-                    tmpColor3[2] = tmpColor4[2];
-                    if (ImGui.colorEdit3(key, tmpColor3)) {
-                        tmpColor4[0] = tmpColor3[0];
-                        tmpColor4[1] = tmpColor3[1];
-                        tmpColor4[2] = tmpColor3[2];
-                        tmpColor4[3] = 1.0f;
-                        props.putPropertyIntValue(key, GraphicsUtils.f4ColorToIntColor(tmpColor4));
-                        return true;
-                    }
-                }
-                return false;
-            } finally {
-                endPropertyRowBg();
-            }
-        }
-
-        if ("chsla4f".equals(kind) || "chsl4f".equals(kind) || "crgba4f".equals(kind) || "crgb4f".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                float[] raw4 = props.getPropertyArray4f(key, new float[]{1f, 1f, 1f, 1f});
-                boolean isHsla = "chsla4f".equals(kind) || "chsl4f".equals(kind);
-                if (isHsla) {
-                    GraphicsUtils.hlsa1ColorToF4Color(raw4, tmpColor4);
-                } else {
-                    System.arraycopy(raw4, 0, tmpColor4, 0, 4);
-                }
-                if (ImGui.colorEdit4(key, tmpColor4)) {
-                    int newArgb = GraphicsUtils.f4ColorToIntColor(tmpColor4);
-                    float[] out4 = new float[4];
-                    if (isHsla) {
-                        GraphicsUtils.intColorToHlsa1(out4, newArgb);
-                    } else {
-                        System.arraycopy(tmpColor4, 0, out4, 0, 4);
-                    }
-                    props.putPropertyArray4fValue(key, out4);
-                    return true;
-                }
-                return false;
+                return editColorPropertyWithEyedropper(props, key, kind, uid);
             } finally {
                 endPropertyRowBg();
             }
@@ -616,6 +575,78 @@ public class PropertyInspectorPanel {
             }
         }
         return false;
+    }
+
+    private boolean editColorPropertyWithEyedropper(CustomPropertiesList props, String key, String kind, String uid) {
+        boolean isIntColor = "crgba".equals(kind) || "crgb".equals(kind) || "crgb_hl".equals(kind);
+        boolean hasAlpha = "crgba".equals(kind) || "crgba4f".equals(kind) || "chsla4f".equals(kind);
+        boolean isHsla = "chsla4f".equals(kind) || "chsl4f".equals(kind);
+
+        if (isIntColor) {
+            int argb = props.getPropertyInt(key, -1);
+            GraphicsUtils.intColorToF4Color(tmpColor4, argb);
+        } else {
+            float[] raw4 = props.getPropertyArray4f(key, new float[]{1f, 1f, 1f, 1f});
+            if (isHsla) {
+                GraphicsUtils.hlsa1ColorToF4Color(raw4, tmpColor4);
+            } else {
+                System.arraycopy(raw4, 0, tmpColor4, 0, 4);
+            }
+        }
+
+        float spacing = ImGui.getStyle().getItemInnerSpacingX();
+        float pickBtnW = 42.0f;
+        float availW = ImGui.calcItemWidth();
+        ImGui.pushItemWidth(Math.max(72.0f, availW - pickBtnW - spacing));
+        boolean edited = false;
+        if (hasAlpha) {
+            edited = ImGui.colorEdit4("##col_" + uid, tmpColor4);
+        } else {
+            tmpColor3[0] = tmpColor4[0];
+            tmpColor3[1] = tmpColor4[1];
+            tmpColor3[2] = tmpColor4[2];
+            if (ImGui.colorEdit3("##col_" + uid, tmpColor3)) {
+                tmpColor4[0] = tmpColor3[0];
+                tmpColor4[1] = tmpColor3[1];
+                tmpColor4[2] = tmpColor3[2];
+                tmpColor4[3] = 1.0f;
+                edited = true;
+            }
+        }
+        ImGui.popItemWidth();
+
+        ImGui.sameLine(0.0f, spacing);
+        boolean pickingThis = colorPicker.isTargeting(props, key);
+        if (pickingThis) {
+            ImGui.pushStyleColor(imgui.flag.ImGuiCol.Button, 0.16f, 0.56f, 0.72f, 1.0f);
+        }
+        if (ImGui.button((pickingThis ? "..." : "Pick") + "##pick_" + uid, pickBtnW, 0.0f)) {
+            colorPicker.beginPick(props, key, kind, tmpColor4[3]);
+        }
+        if (pickingThis) {
+            ImGui.popStyleColor();
+        }
+        if (ImGui.isItemHovered()) {
+            ImGui.setTooltip("Eyedropper: pick color from any pixel on screen (Esc or Right-click to cancel)");
+        }
+
+        ImGui.sameLine(0.0f, spacing);
+        ImGui.textUnformatted(key);
+
+        if (!edited) return false;
+        int newArgb = GraphicsUtils.f4ColorToIntColor(tmpColor4);
+        if (isIntColor) {
+            props.putPropertyIntValue(key, newArgb);
+        } else {
+            float[] out4 = new float[4];
+            if (isHsla) {
+                GraphicsUtils.intColorToHlsa1(out4, newArgb);
+            } else {
+                System.arraycopy(tmpColor4, 0, out4, 0, 4);
+            }
+            props.putPropertyArray4fValue(key, out4);
+        }
+        return true;
     }
 
     private boolean editIntField(String label, String uid, int[] val, int min, int max) {
@@ -1065,6 +1096,7 @@ public class PropertyInspectorPanel {
     }
 
     public void dispose() {
+        colorPicker.cancel();
         for (ThumbEntry e : thumbCache.values()) {
             if (e.texId != 0) {
                 GL11.glDeleteTextures(e.texId);
