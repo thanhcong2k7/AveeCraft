@@ -40,6 +40,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     private volatile boolean muted = false;
     private volatile boolean syntheticBeat = true;
     private volatile boolean highQualityBlur = true;
+    private volatile long seekRevision = 0L;
     private volatile String currentTitle = "No Audio Loaded (Test Signal)";
     private volatile String currentArtist = "Avee Desktop Editor";
     private volatile File audioFile;
@@ -115,6 +116,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                 this.currentArtist = "Local Audio";
                 this.syntheticBeat = false;
                 this.playing = true;
+                this.seekRevision++;
                 AppDesign.setTrackPositionMs(0L);
             }
             return true;
@@ -150,12 +152,14 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                 short[] samples;
                 long curFrame;
                 long totFrames;
+                long iterSeekRev;
                 boolean isPlay;
                 boolean isMute;
                 synchronized (playLock) {
                     samples = this.pcmSamples;
                     curFrame = this.playheadFrame;
                     totFrames = this.totalFrames;
+                    iterSeekRev = this.seekRevision;
                     isPlay = this.playing;
                     isMute = this.muted;
                 }
@@ -164,8 +168,10 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                     int framesThisStep = Math.min(1024, (int) Math.max(0, totFrames - curFrame));
                     if (framesThisStep <= 0) {
                         synchronized (playLock) {
-                            this.playheadFrame = 0L;
-                            AppDesign.setTrackPositionMs(0L);
+                            if (this.seekRevision == iterSeekRev) {
+                                this.playheadFrame = 0L;
+                                AppDesign.setTrackPositionMs(0L);
+                            }
                         }
                         continue;
                     }
@@ -182,8 +188,10 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                         framesThisStep = (int) (dtSec * SAMPLE_RATE);
                     }
                     synchronized (playLock) {
-                        this.playheadFrame = Math.min(totFrames, curFrame + framesThisStep);
-                        AppDesign.setTrackPositionMs((this.playheadFrame * 1000L) / SAMPLE_RATE);
+                        if (this.seekRevision == iterSeekRev) {
+                            this.playheadFrame = Math.min(totFrames, curFrame + framesThisStep);
+                            AppDesign.setTrackPositionMs((this.playheadFrame * 1000L) / SAMPLE_RATE);
+                        }
                     }
                 } else {
                     try { Thread.sleep(16); } catch (InterruptedException ignored) {}
@@ -209,6 +217,8 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     public void setMuted(boolean m) { this.muted = m; }
     public boolean isSyntheticBeat() { return syntheticBeat; }
     public void setSyntheticBeat(boolean s) { this.syntheticBeat = s; }
+    @Override public boolean isAudioPausedForFreeze() { return !isPlaying(); }
+    @Override public long getAudioSeekGeneration() { return seekRevision; }
     public boolean isHighQualityBlur() { return highQualityBlur; }
     public void setHighQualityBlur(boolean h) { this.highQualityBlur = h; }
     public boolean hasAudioLoaded() { return totalFrames > 0; }
@@ -227,6 +237,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             if (totalFrames > 0) {
                 long f = (posMs * SAMPLE_RATE) / 1000L;
                 this.playheadFrame = Math.max(0L, Math.min(totalFrames - 1, f));
+                this.seekRevision++;
             }
         }
         AppDesign.setTrackPositionMs(posMs);
@@ -238,6 +249,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             if (totalFrames > 0) {
                 long f = (ms * SAMPLE_RATE) / 1000L;
                 this.playheadFrame = Math.max(0L, Math.min(totalFrames - 1, f));
+                this.seekRevision++;
                 AppDesign.setTrackPositionMs((this.playheadFrame * 1000L) / SAMPLE_RATE);
             }
         }
@@ -251,13 +263,13 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             if (totalFrames == 0) {
                 AppDesign.setTrackPositionMs((long) (totalTimeWhenPlaying * 1000.0));
             }
+            if (shakePointSmooth.distance(shakePoint) < 0.1f) {
+                shakePoint.x = random.nextFloat() * 2.0f - 1.0f;
+                shakePoint.y = random.nextFloat() * 2.0f - 1.0f;
+                shakePoint.normalize();
+            }
+            Interpolate.Lerp(shakePointSmooth, shakePointSmooth, shakePoint, 0.9);
         }
-        if (shakePointSmooth.distance(shakePoint) < 0.1f) {
-            shakePoint.x = random.nextFloat() * 2.0f - 1.0f;
-            shakePoint.y = random.nextFloat() * 2.0f - 1.0f;
-            shakePoint.normalize();
-        }
-        Interpolate.Lerp(shakePointSmooth, shakePointSmooth, shakePoint, 0.9);
     }
 
     @Override
@@ -276,8 +288,8 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
         if (frames > 0 && src.length >= frames * CHANNELS && !syntheticBeat) {
             for (int i = 0; i < count; i++) {
                 long fIdx = Math.max(0, Math.min(frames - 1, posFrame - (count / 2) + i));
-                short l = playing ? src[(int) (fIdx * 2)] : 0;
-                short r = playing ? src[(int) (fIdx * 2 + 1)] : 0;
+                short l = src[(int) (fIdx * 2)];
+                short r = src[(int) (fIdx * 2 + 1)];
                 dst[i * 2] = l;
                 dst[i * 2 + 1] = r;
                 float mono = (l + r) * 0.5f;
@@ -400,12 +412,14 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             return new Vec2f(arg.x * p, arg.y * p);
         }
         if (MeasureDefs.beatRandomShake.equals(str)) {
-            float m = Math.max(0f, Math.min(1f, isPlaying() ? rms * 2.5f : 0f));
+            if (!isPlaying() && last != null) return new Vec2f(last.x, last.y);
+            float m = Math.max(0f, Math.min(1f, rms * 2.5f));
             float m3 = m * m * m;
             return new Vec2f(shakePointSmooth.x * m3 * arg.x * 0.025f, shakePointSmooth.y * m3 * arg.x * 0.025f);
         }
         if (MeasureDefs.beatCamShakeMore.equals(str)) {
-            float max = Math.max(Math.min(isPlaying() ? rms * 2.5f : 0.0f, 1.0f), 0.0f);
+            if (!isPlaying() && last != null) return new Vec2f(last.x, last.y);
+            float max = Math.max(Math.min(rms * 2.5f, 1.0f), 0.0f);
             float f3 = max * max;
             Vec2f pos = handheldMotionLotOfShake.getPos((((totalFrameTimeF * 0.5f) * max) * arg.y) % 1.0f);
             pos.x = (pos.x - 0.5f) * arg.x * f3 * 0.06f;
@@ -414,7 +428,8 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             return pos;
         }
         if (MeasureDefs.beatCamShakeLess.equals(str)) {
-            float max = Math.max(Math.min(isPlaying() ? rms * 2.5f : 0.0f, 1.0f), 0.0f);
+            if (!isPlaying() && last != null) return new Vec2f(last.x, last.y);
+            float max = Math.max(Math.min(rms * 2.5f, 1.0f), 0.0f);
             float f3 = max * max;
             Vec2f pos = handheldMotionSmooth.getPos((((totalFrameTimeF * 0.5f) * max) * arg.y) % 1.0f);
             pos.x = (pos.x - 0.5f) * arg.x * f3 * 0.06f;
@@ -447,13 +462,15 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             return new Vec2f(lerp, lerp);
         }
         if (MeasureDefs.beatCamShakeRotMore.equals(str)) {
-            float max = Math.max(Math.min(isPlaying() ? rms * 2.5f : 0.0f, 1.0f), 0.0f);
+            if (!isPlaying() && last != null) return new Vec2f(last.x, last.y);
+            float max = Math.max(Math.min(rms * 2.5f, 1.0f), 0.0f);
             double rot = handheldMotionLotOfShake.getRot(((totalFrameTimeF * 0.5f) * arg.y) % 1.0f);
             float lerp = Interpolate.Lerp(prev.x, ((float) (rot / 6.283185307179586d)) * arg.x * 0.5f * max * max, 0.800000011920929d);
             return new Vec2f(lerp, lerp);
         }
         if (MeasureDefs.beatCamShakeRotLess.equals(str)) {
-            float max = Math.max(Math.min(isPlaying() ? rms * 2.5f : 0.0f, 1.0f), 0.0f);
+            if (!isPlaying() && last != null) return new Vec2f(last.x, last.y);
+            float max = Math.max(Math.min(rms * 2.5f, 1.0f), 0.0f);
             double rot = handheldMotionSmooth.getRot(((totalFrameTimeF * 0.5f) * arg.y) % 1.0f);
             float lerp = Interpolate.Lerp(prev.x, ((float) (rot / 6.283185307179586d)) * arg.x * 0.5f * max * max, 0.800000011920929d);
             return new Vec2f(lerp, lerp);

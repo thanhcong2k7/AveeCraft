@@ -24,6 +24,7 @@ public class SegmentAudioWaveformData implements ISegmentDataProvider, IFrameDat
     private float rangeHiSmooth = 1000.0f;
     private float rangeLoSmooth = 0.0f;
     private float rangeSmoothMul = 1.0f;
+    private final SegmentDataProviderFactory.PauseFreezeState pauseFreeze = new SegmentDataProviderFactory.PauseFreezeState();
     ISimpleListFloat barValsList = new ISimpleListFloat() { // from class: com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAudioWaveformData.1
         @Override // com.daaw.avee.Common.ISimpleListFloat
         public int size() {
@@ -51,6 +52,10 @@ public class SegmentAudioWaveformData implements ISegmentDataProvider, IFrameDat
 
     @Override // com.daaw.avee.comp.Visualizer.Elements.Segment.ISegmentDataProvider
     public void process(IRenderState iRenderState, InternalVisualizationDataProvider internalVisualizationDataProvider) {
+        if (this.pauseFreeze.shouldFreeze(internalVisualizationDataProvider)) {
+            return;
+        }
+        this.pauseFreeze.markProcessed(internalVisualizationDataProvider);
         ISimpleListShort simpleListConstantShort;
         int i;
         int min = Math.min(Math.max(1 << this.sampleInCountPower, 32), 16384);

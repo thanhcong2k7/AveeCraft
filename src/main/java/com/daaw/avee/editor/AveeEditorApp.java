@@ -29,10 +29,13 @@ import imgui.app.Application;
 import imgui.app.Configuration;
 import imgui.flag.ImGuiCol;
 import imgui.flag.ImGuiDragDropFlags;
+import imgui.flag.ImGuiInputTextFlags;
+import imgui.flag.ImGuiKey;
 import imgui.flag.ImGuiTreeNodeFlags;
 import imgui.flag.ImGuiWindowFlags;
 import imgui.type.ImBoolean;
 import imgui.type.ImInt;
+import imgui.type.ImString;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -92,6 +95,8 @@ public class AveeEditorApp extends Application implements SceneHost {
     private final ImBoolean synthChk = new ImBoolean(true);
     private final ImBoolean muteChk = new ImBoolean(false);
     private final float[] seekTmp = new float[1];
+    private final ImString timestampEditBuf = new ImString(32);
+    private boolean timestampEditing = false;
     private final int smokeFrames = Integer.getInteger("avee.smokeFrames", 0);
     private int frameCounter = 0;
     private final List<Object> listenerHolders = new ArrayList<>();
@@ -771,14 +776,93 @@ public class AveeEditorApp extends Application implements SceneHost {
         long posMs = audioEngine.getPositionMs();
         seekTmp[0] = posMs / 1000f;
         float maxSec = Math.max(1f, durMs / 1000f);
-        ImGui.setNextItemWidth(-120f);
-        if (ImGui.sliderFloat("##seek", seekTmp, 0f, maxSec, "%.1fs")) {
+        ImGui.setNextItemWidth(-190f);
+        if (ImGui.sliderFloat("##seek", seekTmp, 0f, maxSec, formatTimestamp(posMs))) {
             audioEngine.seekMs((long) (seekTmp[0] * 1000f));
         }
         ImGui.sameLine();
-        ImGui.text(String.format("%d:%02d / %d:%02d",
-                (posMs / 1000) / 60, (posMs / 1000) % 60,
-                (durMs / 1000) / 60, (durMs / 1000) % 60));
+        if (!timestampEditing) {
+            timestampEditBuf.set(formatTimestamp(posMs));
+        }
+        ImGui.setNextItemWidth(76f);
+        int tsFlags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
+        boolean tsEntered = ImGui.inputText("##jumpTs", timestampEditBuf, tsFlags);
+        if (ImGui.isItemActivated()) {
+            timestampEditing = true;
+        }
+        if (ImGui.isItemHovered() && !ImGui.isItemActive()) {
+            ImGui.setTooltip("Type timestamp (m:ss, h:mm:ss, or seconds) and press Enter/Tab");
+        }
+        if (timestampEditing) {
+            boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
+            boolean tab = (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
+                    && ImGui.isKeyPressed(ImGuiKey.Tab, false);
+            boolean deactivated = ImGui.isItemDeactivated();
+            if (esc) {
+                timestampEditing = false;
+                timestampEditBuf.set(formatTimestamp(posMs));
+            } else if (tsEntered || tab || deactivated) {
+                long targetMs = parseTimestampMs(timestampEditBuf.get(), durMs);
+                if (targetMs >= 0L && audioEngine.hasAudioLoaded()) {
+                    audioEngine.seekMs(targetMs);
+                    statusMessage = "Seeked to " + formatTimestamp(audioEngine.getPositionMs());
+                }
+                timestampEditing = false;
+            }
+        }
+        ImGui.sameLine();
+        ImGui.text("/ " + formatTimestamp(durMs));
+    }
+
+    public static String formatTimestamp(long ms) {
+        long clamped = Math.max(0L, ms);
+        long totalSec = clamped / 1000L;
+        long h = totalSec / 3600L;
+        long m = (totalSec % 3600L) / 60L;
+        long s = totalSec % 60L;
+        if (h > 0L) {
+            return String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, s);
+        }
+        return String.format(java.util.Locale.US, "%d:%02d", m, s);
+    }
+
+    public static long parseTimestampMs(String text, long durationMs) {
+        if (text == null) return -1L;
+        String t = text.trim();
+        if (t.isEmpty()) return -1L;
+        if (t.endsWith("s") || t.endsWith("S")) {
+            t = t.substring(0, t.length() - 1).trim();
+        }
+        try {
+            double totalSec;
+            if (t.contains(":")) {
+                String[] parts = t.split(":");
+                if (parts.length == 2) {
+                    long mins = Long.parseLong(parts[0].trim());
+                    double secs = Double.parseDouble(parts[1].trim());
+                    if (mins < 0 || secs < 0.0 || Double.isNaN(secs) || Double.isInfinite(secs)) return -1L;
+                    totalSec = mins * 60.0 + secs;
+                } else if (parts.length == 3) {
+                    long hrs = Long.parseLong(parts[0].trim());
+                    long mins = Long.parseLong(parts[1].trim());
+                    double secs = Double.parseDouble(parts[2].trim());
+                    if (hrs < 0 || mins < 0 || secs < 0.0 || Double.isNaN(secs) || Double.isInfinite(secs)) return -1L;
+                    totalSec = hrs * 3600.0 + mins * 60.0 + secs;
+                } else {
+                    return -1L;
+                }
+            } else {
+                totalSec = Double.parseDouble(t);
+                if (totalSec < 0.0 || Double.isNaN(totalSec) || Double.isInfinite(totalSec)) return -1L;
+            }
+            long ms = Math.round(totalSec * 1000.0);
+            if (durationMs > 0L) {
+                ms = Math.max(0L, Math.min(durationMs, ms));
+            }
+            return Math.max(0L, ms);
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
     }
 
     private void renderInspectorPanel() {

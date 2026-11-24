@@ -1,10 +1,29 @@
 package com.daaw.avee.comp.Visualizer.Elements.Segment;
 
 import com.daaw.avee.Common.tlog;
+import com.daaw.avee.comp.Visualizer.InternalVisualizationDataProvider;
 /* loaded from: classes.dex */
 public class SegmentDataProviderFactory {
     public static final String typeNameNone = "None";
     public static final String[] typeNames = {SegmentAudioWaveformData.typeName, SegmentAudioSpectrumData.typeName, SegmentAudioSpectrumDataPhaseS.typeName};
+
+    static final class PauseFreezeState {
+        boolean hasFrozenFrame = false;
+        long lastSeekGeneration = Long.MIN_VALUE;
+
+        boolean shouldFreeze(InternalVisualizationDataProvider dataProvider) {
+            if (dataProvider == null) return false;
+            long gen = dataProvider.getAudioSeekGeneration();
+            return dataProvider.isAudioPausedForFreeze() && this.hasFrozenFrame && gen == this.lastSeekGeneration;
+        }
+
+        void markProcessed(InternalVisualizationDataProvider dataProvider) {
+            this.hasFrozenFrame = true;
+            if (dataProvider != null) {
+                this.lastSeekGeneration = dataProvider.getAudioSeekGeneration();
+            }
+        }
+    }
 
     public static ISegmentDataProvider create(String str, ISegmentDataProvider iSegmentDataProvider) {
         if (getTypeName(iSegmentDataProvider, "None").equals(str)) {

@@ -36,4 +36,12 @@ public interface InternalVisualizationDataProvider {
     String onRequestsMeasureText(String str);
 
     void onThemeChanged();
+
+    default boolean isAudioPausedForFreeze() {
+        return false;
+    }
+
+    default long getAudioSeekGeneration() {
+        return 0L;
+    }
 }

@@ -31,6 +31,7 @@ public class SegmentAudioSpectrumData implements ISegmentDataProvider, IFrameDat
     final BlockingQueue<ProcessingData> processingQueue = new ArrayBlockingQueue(1);
     final BlockingQueue<float[]> processingResultQueue = new ArrayBlockingQueue(2);
     Thread audioProcessTh = null;
+    private final SegmentDataProviderFactory.PauseFreezeState pauseFreeze = new SegmentDataProviderFactory.PauseFreezeState();
 
     public void setSampleInCountPower(int i) {
     }
@@ -681,8 +682,13 @@ public class SegmentAudioSpectrumData implements ISegmentDataProvider, IFrameDat
 
     @Override // com.daaw.avee.comp.Visualizer.Elements.Segment.ISegmentDataProvider
     public void process(IRenderState iRenderState, InternalVisualizationDataProvider internalVisualizationDataProvider) {
-        if (!iRenderState.getMultiThread()) {
+        if (this.pauseFreeze.shouldFreeze(internalVisualizationDataProvider)) {
+            return;
+        }
+        boolean pausedMode = internalVisualizationDataProvider != null && internalVisualizationDataProvider.isAudioPausedForFreeze();
+        if (!iRenderState.getMultiThread() || pausedMode || !this.pauseFreeze.hasFrozenFrame) {
             this.frameValuesAccumulator.addFrame(this.audioProcess.processTh(iRenderState.getFrameTimeF(), internalVisualizationDataProvider));
+            this.pauseFreeze.markProcessed(internalVisualizationDataProvider);
             return;
         }
         MaybeStartAudioProcessThread();
@@ -690,6 +696,7 @@ public class SegmentAudioSpectrumData implements ISegmentDataProvider, IFrameDat
             float[] poll = this.processingResultQueue.poll(100L, TimeUnit.MILLISECONDS);
             if (poll != null) {
                 this.frameValuesAccumulator.addFrame(poll);
+                this.pauseFreeze.markProcessed(internalVisualizationDataProvider);
             }
         } catch (InterruptedException unused) {
         }

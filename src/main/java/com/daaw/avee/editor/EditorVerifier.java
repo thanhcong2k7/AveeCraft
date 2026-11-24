@@ -922,6 +922,9 @@ public class EditorVerifier {
         // Part 3 verification: Between-item drop target resolution & Composition move with child layers + ref remap
         verifyPart3HierarchyAndCompMove(rc, audio, fbo);
 
+        // Part 4 verification: Manual timestamp parse/seek & spectrum/measure freeze on pause
+        verifyPart4SeekAndPauseFreeze();
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);
@@ -1221,5 +1224,138 @@ public class EditorVerifier {
             throw new AssertionError("GL error after Composition reorder: " + glErr);
         }
         System.out.println("Part 3 verification OK (drop line slot resolution, Composition move + child layers + ref remap OK)");
+    }
+
+    private static void verifyPart4SeekAndPauseFreeze() throws Exception {
+        // 1) Timestamp parsing & formatting
+        if (AveeEditorApp.parseTimestampMs("1:23", 180_000L) != 83_000L
+                || AveeEditorApp.parseTimestampMs("01:23.5", 180_000L) != 83_500L
+                || AveeEditorApp.parseTimestampMs("45", 180_000L) != 45_000L
+                || AveeEditorApp.parseTimestampMs("45.25s", 180_000L) != 45_250L
+                || AveeEditorApp.parseTimestampMs("1:01:02", 4_000_000L) != 3_662_000L
+                || AveeEditorApp.parseTimestampMs("99:99", 120_000L) != 120_000L
+                || AveeEditorApp.parseTimestampMs("not-a-time", 120_000L) != -1L) {
+            throw new AssertionError("Manual timestamp parseTimestampMs mismatch");
+        }
+        if (!"1:23".equals(AveeEditorApp.formatTimestamp(83_000L))
+                || !"1:01:02".equals(AveeEditorApp.formatTimestamp(3_662_000L))) {
+            throw new AssertionError("formatTimestamp mismatch");
+        }
+
+        // 2) Load real generated audio, play -> pause -> verify spectrum, waveform, RMS & beat shake freeze cleanly
+        File tmpWav = File.createTempFile("avee_part4_sine_", ".wav");
+        tmpWav.deleteOnExit();
+        Process ff = new ProcessBuilder(
+                FfmpegLocator.ffmpeg(), "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2.5",
+                "-ac", "2", "-ar", "44100", tmpWav.getAbsolutePath())
+                .redirectErrorStream(true).start();
+        ff.getInputStream().readAllBytes();
+        int rc = ff.waitFor();
+        if (rc != 0 || tmpWav.length() < 1000) {
+            throw new AssertionError("Failed to generate sine audio fixture exit=" + rc);
+        }
+
+        DesktopAudioEngine eng = new DesktopAudioEngine(false);
+        if (!eng.loadAudioFile(tmpWav)) {
+            throw new AssertionError("DesktopAudioEngine failed to load generated WAV");
+        }
+        eng.setSyntheticBeat(false);
+        eng.setPlaying(true);
+
+        com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAudioSpectrumData spec =
+                new com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAudioSpectrumData();
+        com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAudioSpectrumDataPhaseS phaseS =
+                new com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAudioSpectrumDataPhaseS();
+        com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAudioWaveformData wave =
+                new com.daaw.avee.comp.Visualizer.Elements.Segment.SegmentAudioWaveformData();
+
+        com.daaw.avee.comp.Visualizer.Graphic.RenderState fakeRs =
+                new com.daaw.avee.comp.Visualizer.Graphic.RenderState(eng) {
+                    @Override public float getFrameTimeF() { return 0.016f; }
+                    @Override public boolean getMultiThread() { return false; }
+                };
+
+        for (int f = 0; f < 12; f++) {
+            eng.stepOfflineFrame(400L + f * 20L, 0.016f);
+            spec.process(fakeRs, eng);
+            phaseS.process(fakeRs, eng);
+            wave.process(fakeRs, eng);
+        }
+
+        float[] specBeforePause = spec.getFrameValues(0, 0).clone();
+        float[] phaseBeforePause = phaseS.getFrameValues(0, 0).clone();
+        float[] waveBeforePause = wave.getFrameValues(0, 0).clone();
+        float rmsBeforePause = spec.getRms();
+        float phaseRmsBeforePause = phaseS.getRms();
+        float waveRmsBeforePause = wave.getRms();
+        float maxBar = 0f;
+        for (float v : specBeforePause) maxBar = Math.max(maxBar, v);
+        if (maxBar <= 0.01f || rmsBeforePause <= 0.001f) {
+            throw new AssertionError("Expected active spectrum/RMS before pause, got maxBar="
+                    + maxBar + " rms=" + rmsBeforePause);
+        }
+
+        com.daaw.avee.comp.Common.MeterOutputData meter = new com.daaw.avee.comp.Common.MeterOutputData();
+        meter.frameDataRmsValue = rmsBeforePause;
+        meter.peakBarIndex = spec.getPeakBarIndex();
+        com.daaw.avee.Common.Vec2f arg = new com.daaw.avee.Common.Vec2f(0.5f, 0.5f);
+        com.daaw.avee.Common.Vec2f shakeActive = eng.onRequestMeasureVec2f(
+                com.daaw.avee.comp.Common.MeasureDefs.beatRandomShake, arg, null, meter, fakeRs);
+
+        // Now pause! Spectrum, PhaseS, waveform, RMS, and beat shake MUST freeze at exact paused state across many frames
+        eng.setPlaying(false);
+        for (int f = 0; f < 30; f++) {
+            eng.tickFrame(0.016f);
+            spec.process(fakeRs, eng);
+            phaseS.process(fakeRs, eng);
+            wave.process(fakeRs, eng);
+        }
+        float[] specAfterPause = spec.getFrameValues(0, 0);
+        float[] phaseAfterPause = phaseS.getFrameValues(0, 0);
+        float[] waveAfterPause = wave.getFrameValues(0, 0);
+        if (Math.abs(spec.getRms() - rmsBeforePause) > 1e-6f
+                || Math.abs(phaseS.getRms() - phaseRmsBeforePause) > 1e-6f
+                || Math.abs(wave.getRms() - waveRmsBeforePause) > 1e-6f) {
+            throw new AssertionError("RMS decayed/reset on pause: before=" + rmsBeforePause + " after=" + spec.getRms());
+        }
+        for (int i = 0; i < specBeforePause.length; i++) {
+            if (Math.abs(specAfterPause[i] - specBeforePause[i]) > 1e-6f) {
+                throw new AssertionError("Spectrum bar[" + i + "] changed on pause: before="
+                        + specBeforePause[i] + " after=" + specAfterPause[i]);
+            }
+        }
+        for (int i = 0; i < phaseBeforePause.length; i++) {
+            if (Math.abs(phaseAfterPause[i] - phaseBeforePause[i]) > 1e-6f) {
+                throw new AssertionError("PhaseS spectrum bar[" + i + "] changed on pause: before="
+                        + phaseBeforePause[i] + " after=" + phaseAfterPause[i]);
+            }
+        }
+        for (int i = 0; i < waveBeforePause.length; i++) {
+            if (Math.abs(waveAfterPause[i] - waveBeforePause[i]) > 1e-6f) {
+                throw new AssertionError("Waveform bar[" + i + "] changed on pause");
+            }
+        }
+        com.daaw.avee.Common.Vec2f shakeFrozen = eng.onRequestMeasureVec2f(
+                com.daaw.avee.comp.Common.MeasureDefs.beatRandomShake, arg, shakeActive, meter, fakeRs);
+        if (Math.abs(shakeFrozen.x - shakeActive.x) > 1e-6f || Math.abs(shakeFrozen.y - shakeActive.y) > 1e-6f) {
+            throw new AssertionError("BeatRandomShake moved/reset on pause");
+        }
+
+        // Seek while paused jumps position accurately and refreshes spectrum once before re-freezing
+        eng.seekMs(1400L);
+        if (Math.abs(eng.getPositionMs() - 1400L) > 5L) {
+            throw new AssertionError("seekMs while paused failed: pos=" + eng.getPositionMs());
+        }
+        spec.process(fakeRs, eng);
+        float[] specAfterPausedSeek = spec.getFrameValues(0, 0).clone();
+        spec.process(fakeRs, eng);
+        float[] specFrozenAfterSeek = spec.getFrameValues(0, 0);
+        for (int i = 0; i < specAfterPausedSeek.length; i++) {
+            if (Math.abs(specFrozenAfterSeek[i] - specAfterPausedSeek[i]) > 1e-6f) {
+                throw new AssertionError("Spectrum failed to stay frozen after seek while paused");
+            }
+        }
+        eng.shutdown();
+        System.out.println("Part 4 verification OK (manual timestamp parse/seek + pause spectrum/waveform/shake freeze OK)");
     }
 }
