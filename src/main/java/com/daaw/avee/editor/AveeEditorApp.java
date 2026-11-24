@@ -74,6 +74,15 @@ public class AveeEditorApp extends Application implements SceneHost {
     private CustomScene currentScene;
     private final PropertyInspectorPanel inspector = new PropertyInspectorPanel();
     private final ExportDialogPanel exportDialog = new ExportDialogPanel();
+    private final TemplatePickerPanel templatePicker = new TemplatePickerPanel();
+    private TemplateLibraryStore templateLibrary;
+    private String activeTemplateId = TemplateLibraryStore.presetId(0);
+    private RendererCore thumbRenderer;
+    private int thumbFbo = 0;
+    private int thumbTex = 0;
+    private final java.util.Set<String> warmedPreviewIds = new java.util.HashSet<>();
+    private boolean previewRefreshPending = false;
+    private long previewDirtyAtNs = 0L;
 
     private int selectedCompIdx = 0;
     private int selectedElemIdx = -1; // -1 selects the composition itself
@@ -165,7 +174,13 @@ public class AveeEditorApp extends Application implements SceneHost {
         ensurePreviewFbo(previewW, previewH);
         rendererCore.onSurfaceChanged(null, previewW, previewH);
 
-        loadBuiltInPreset(0);
+        templateLibrary = new TemplateLibraryStore();
+        thumbRenderer = new RendererCore(ctx, ctx.getResources(), audioEngine);
+        thumbRenderer.onSurfaceCreated(null, null);
+        ensureThumbFbo(TemplateLibraryStore.THUMB_W, TemplateLibraryStore.THUMB_H);
+        thumbRenderer.onSurfaceChanged(null, TemplateLibraryStore.THUMB_W, TemplateLibraryStore.THUMB_H);
+
+        loadTemplateFromLibrary(templateLibrary.getLastSelectedId());
         if (updateManager.getSettings().autoCheckUpdates) {
             updateManager.checkForUpdatesAsync(false);
         }
@@ -254,6 +269,8 @@ public class AveeEditorApp extends Application implements SceneHost {
         GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
         audioEngine.setLatestStats(rendererCore.getFrameStats());
 
+        updateTemplatePreviewsIncremental(nowNs);
+
         renderEditorUi();
         frameCounter++;
         if (smokeFrames > 0 && frameCounter >= smokeFrames) {
@@ -271,6 +288,10 @@ public class AveeEditorApp extends Application implements SceneHost {
         if (exportDialog.isExporting()) {
             exportDialog.cancelExport();
         }
+        templatePicker.dispose();
+        if (templateLibrary != null) {
+            templateLibrary.shutdown();
+        }
         inspector.dispose();
         if (audioEngine != null) {
             audioEngine.shutdown();
@@ -279,6 +300,7 @@ public class AveeEditorApp extends Application implements SceneHost {
             GL11.glDeleteTextures(aboutIconTex);
             aboutIconTex = 0;
         }
+        deleteThumbFbo();
         deletePreviewFbo();
         super.postRun();
     }
@@ -318,6 +340,108 @@ public class AveeEditorApp extends Application implements SceneHost {
             previewTex = 0;
         }
         fboW = fboH = 0;
+    }
+
+    private void ensureThumbFbo(int w, int h) {
+        if (thumbFbo != 0) return;
+        thumbTex = GL11.glGenTextures();
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, thumbTex);
+        GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA8, w, h, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, (ByteBuffer) null);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_S, GL12.GL_CLAMP_TO_EDGE);
+        GL11.glTexParameteri(GL11.GL_TEXTURE_2D, GL11.GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE);
+        GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
+
+        thumbFbo = GL30.glGenFramebuffers();
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, thumbFbo);
+        GL30.glFramebufferTexture2D(GL30.GL_FRAMEBUFFER, GL30.GL_COLOR_ATTACHMENT0, GL11.GL_TEXTURE_2D, thumbTex, 0);
+        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+    }
+
+    private void deleteThumbFbo() {
+        if (thumbFbo != 0) {
+            GL30.glDeleteFramebuffers(thumbFbo);
+            thumbFbo = 0;
+        }
+        if (thumbTex != 0) {
+            GL11.glDeleteTextures(thumbTex);
+            thumbTex = 0;
+        }
+    }
+
+    private void updateTemplatePreviewsIncremental(long nowNs) {
+        if (templateLibrary == null || activeTemplateId == null) return;
+        if (previewRefreshPending && (nowNs - previewDirtyAtNs) > 700_000_000L && previewFbo != 0) {
+            previewRefreshPending = false;
+            try {
+                GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, previewFbo);
+                Bitmap bmp = GraphicsUtils.savePixels(0, 0, previewW, previewH, null);
+                GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+                if (bmp != null && bmp.getBufferedImage() != null) {
+                    templateLibrary.schedulePreviewSave(activeTemplateId, bmp.getBufferedImage());
+                }
+            } catch (Throwable ignored) {
+                GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+            }
+            return;
+        }
+        if (thumbRenderer == null || thumbFbo == 0 || (frameCounter % 2) != 0) return;
+        TemplateLibraryStore.TemplateEntry missing = null;
+        for (TemplateLibraryStore.TemplateEntry e : templateLibrary.getEntries()) {
+            if (!e.previewFile.isFile() && !e.id.equals(activeTemplateId) && !warmedPreviewIds.contains(e.id)) {
+                missing = e;
+                break;
+            }
+        }
+        if (missing == null) {
+            TemplateLibraryStore.TemplateEntry cur = templateLibrary.getEntry(activeTemplateId);
+            if (cur != null && !cur.previewFile.isFile() && previewFbo != 0 && warmedPreviewIds.add(cur.id)) {
+                try {
+                    GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, previewFbo);
+                    Bitmap bmp = GraphicsUtils.savePixels(0, 0, previewW, previewH, null);
+                    GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+                    if (bmp != null && bmp.getBufferedImage() != null) {
+                        templateLibrary.schedulePreviewSave(cur.id, bmp.getBufferedImage());
+                    }
+                } catch (Throwable ignored) {
+                    GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+                }
+            }
+            return;
+        }
+        warmedPreviewIds.add(missing.id);
+        File prevWs = com.daaw.avee.comp.AppPreferences.AppPreferences.getActiveWorkspaceFolder();
+        try {
+            com.daaw.avee.comp.AppPreferences.AppPreferences.setActiveWorkspaceFolder(missing.assetsDir);
+            CustomScene s = missing.sceneFile.isFile()
+                    ? CustomScene.deserialize(java.nio.file.Files.readString(missing.sceneFile.toPath(), java.nio.charset.StandardCharsets.UTF_8))
+                    : null;
+            if (s != null) {
+                thumbRenderer.setThemeElements(s);
+                for (int i = 0; i < 2; i++) {
+                    Looper.drainMainQueue();
+                    GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, thumbFbo);
+                    GLES20.setRedirectFramebuffer0(thumbFbo);
+                    thumbRenderer.onDrawFrame(null);
+                    GLES20.setRedirectFramebuffer0(0);
+                    GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+                }
+                GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, thumbFbo);
+                Bitmap bmp = GraphicsUtils.savePixels(0, 0, TemplateLibraryStore.THUMB_W, TemplateLibraryStore.THUMB_H, null);
+                GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+                if (bmp != null && bmp.getBufferedImage() != null) {
+                    templateLibrary.schedulePreviewSave(missing.id, bmp.getBufferedImage());
+                }
+            }
+        } catch (Throwable ignored) {
+            GLES20.setRedirectFramebuffer0(0);
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+        } finally {
+            if (prevWs != null) {
+                com.daaw.avee.comp.AppPreferences.AppPreferences.setActiveWorkspaceFolder(prevWs);
+            }
+        }
     }
 
     private void renderEditorUi() {
@@ -361,6 +485,7 @@ public class AveeEditorApp extends Application implements SceneHost {
         ImGui.end();
 
         exportDialog.render(currentScene, rendererCore, audioEngine, previewW, previewH);
+        renderTemplatePickerModal();
         renderAboutDialog();
         renderUpdateDialog();
         inspector.getColorPicker().renderOverlay(() -> {
@@ -369,14 +494,92 @@ public class AveeEditorApp extends Application implements SceneHost {
         });
     }
 
+    private void renderTemplatePickerModal() {
+        if (templateLibrary == null) return;
+        templatePicker.render(templateLibrary, activeTemplateId, new TemplatePickerPanel.HostCallbacks() {
+            @Override
+            public void onSelectTemplate(String id) {
+                loadTemplateFromLibrary(id);
+            }
+
+            @Override
+            public void onImportTemplate() {
+                File f = openDialog("Import Avee Template (.viz / .json)",
+                        new String[]{"*.viz", "*.json", "*.txt"}, "Avee Templates (*.viz, *.json)");
+                if (f != null) importIntoLibraryAndSelect(f);
+            }
+
+            @Override
+            public void onExportTemplate(String id) {
+                TemplateLibraryStore.TemplateEntry e = templateLibrary.getEntry(id);
+                String defName = (e != null ? e.title.replaceAll("[^A-Za-z0-9._-]", "_") : "template") + ".viz";
+                File out = saveDialog("Export Template as .viz", defName,
+                        new String[]{"*.viz"}, "Avee Template Archive (*.viz)");
+                if (out != null) {
+                    try {
+                        boolean isActive = id != null && id.equals(activeTemplateId);
+                        templateLibrary.exportViz(id, ensureExt(out, ".viz"),
+                                isActive ? currentScene : null, isActive ? rendererCore : null);
+                        statusMessage = "Exported " + out.getName();
+                    } catch (Exception ex) {
+                        statusMessage = "Export .viz failed: " + ex.getMessage();
+                    }
+                }
+            }
+
+            @Override
+            public void onDuplicateTemplate(String id) {
+                try {
+                    TemplateLibraryStore.TemplateEntry dup = templateLibrary.duplicateTemplate(id);
+                    loadTemplateFromLibrary(dup.id);
+                    statusMessage = "Duplicated as " + dup.title;
+                } catch (Exception ex) {
+                    statusMessage = "Duplicate failed: " + ex.getMessage();
+                }
+            }
+
+            @Override
+            public void onResetBuiltInTemplate(String id) {
+                try {
+                    inspector.getColorPicker().cancel();
+                    currentScene = templateLibrary.resetBuiltInPreset(id);
+                    activeTemplateId = id;
+                    TemplateLibraryStore.TemplateEntry e = templateLibrary.getEntry(id);
+                    activePresetIdx = e != null ? e.builtInIndex : -1;
+                    rendererCore.setThemeElements(currentScene);
+                    currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
+                    selectedCompIdx = 0;
+                    selectedElemIdx = (currentScene.getEntryCount() > 0 && currentScene.getEntry(0).getEntryCount() > 0) ? 0 : -1;
+                    warmedPreviewIds.remove(id);
+                    previewRefreshPending = true;
+                    previewDirtyAtNs = System.nanoTime() - 1_000_000_000L;
+                    statusMessage = "Reset Preset " + activePresetIdx;
+                } catch (Exception ex) {
+                    statusMessage = "Reset failed: " + ex.getMessage();
+                }
+            }
+
+            @Override
+            public void onDeleteTemplate(String id) {
+                if (templateLibrary.deleteTemplate(id)) {
+                    loadTemplateFromLibrary(templateLibrary.getLastSelectedId());
+                    statusMessage = "Removed imported template";
+                }
+            }
+        });
+    }
+
     private void renderMainMenuBar() {
         if (ImGui.beginMainMenuBar()) {
             if (ImGui.beginMenu("File")) {
-                if (ImGui.menuItem("Open .viz / .json...")) {
-                    File f = openDialog("Open Avee Template", new String[]{"*.viz", "*.json", "*.txt"}, "Avee Templates (*.viz, *.json)");
-                    if (f != null) loadTemplateFile(f);
+                if (ImGui.menuItem("Templates Gallery...")) {
+                    templatePicker.open();
                 }
-                if (ImGui.beginMenu("Load Built-in Preset")) {
+                if (ImGui.menuItem("Import .viz / .json into Library...")) {
+                    File f = openDialog("Import Avee Template", new String[]{"*.viz", "*.json", "*.txt"}, "Avee Templates (*.viz, *.json)");
+                    if (f != null) importIntoLibraryAndSelect(f);
+                }
+                if (ImGui.beginMenu("Built-in Presets")) {
                     for (int i = 0; i <= 17; i++) {
                         if (ImGui.menuItem("Visualizer Preset " + i)) {
                             loadBuiltInPreset(i);
@@ -385,15 +588,13 @@ public class AveeEditorApp extends Application implements SceneHost {
                     ImGui.endMenu();
                 }
                 ImGui.separator();
-                if (ImGui.menuItem("Save .viz...", currentProjectFile != null)) {
-                    if (currentProjectFile != null && currentProjectFile.getName().toLowerCase().endsWith(".viz")) {
-                        saveVizFile(currentProjectFile);
-                    } else {
-                        File f = saveDialog("Save .viz Archive", "template.viz", new String[]{"*.viz"}, "Avee Template Archive (*.viz)");
-                        if (f != null) saveVizFile(ensureExt(f, ".viz"));
-                    }
+                if (ImGui.menuItem("Export Active Template (.viz)...")) {
+                    TemplateLibraryStore.TemplateEntry curE = templateLibrary != null ? templateLibrary.getEntry(activeTemplateId) : null;
+                    String defName = (curE != null ? curE.title.replaceAll("[^A-Za-z0-9._-]", "_") : "template") + ".viz";
+                    File f = saveDialog("Save .viz Archive", defName, new String[]{"*.viz"}, "Avee Template Archive (*.viz)");
+                    if (f != null) saveVizFile(ensureExt(f, ".viz"));
                 }
-                if (ImGui.menuItem("Save .viz As...")) {
+                if (ImGui.menuItem("Save .viz As...", currentProjectFile != null || activeTemplateId != null)) {
                     File f = saveDialog("Save .viz Archive", "template.viz", new String[]{"*.viz"}, "Avee Template Archive (*.viz)");
                     if (f != null) saveVizFile(ensureExt(f, ".viz"));
                 }
@@ -733,6 +934,10 @@ public class AveeEditorApp extends Application implements SceneHost {
         ImGui.sameLine();
         ImGui.textDisabled("FPS: " + rendererCore.getFrameStats().fps);
         ImGui.sameLine();
+        if (ImGui.button("Templates...")) {
+            templatePicker.open();
+        }
+        ImGui.sameLine();
         if (ImGui.button("Export Video...")) {
             exportDialog.openDialog(audioEngine);
         }
@@ -898,6 +1103,10 @@ public class AveeEditorApp extends Application implements SceneHost {
     }
 
     private void loadBuiltInPreset(int idx) {
+        if (templateLibrary != null) {
+            loadTemplateFromLibrary(TemplateLibraryStore.presetId(idx));
+            return;
+        }
         inspector.getColorPicker().cancel();
         try {
             currentScene = VizArchiveManager.loadPreset(idx);
@@ -915,6 +1124,10 @@ public class AveeEditorApp extends Application implements SceneHost {
     }
 
     private void loadTemplateFile(File f) {
+        if (templateLibrary != null) {
+            importIntoLibraryAndSelect(f);
+            return;
+        }
         inspector.getColorPicker().cancel();
         try {
             currentScene = VizArchiveManager.loadFile(f);
@@ -929,6 +1142,54 @@ public class AveeEditorApp extends Application implements SceneHost {
             statusMessage = "Load failed: " + e.getMessage();
             e.printStackTrace();
         }
+    }
+
+    private void loadTemplateFromLibrary(String id) {
+        inspector.getColorPicker().cancel();
+        try {
+            if (templateLibrary != null) {
+                templateLibrary.flushPendingSavesSync(1000L);
+                TemplateLibraryStore.TemplateEntry e = templateLibrary.getEntry(id);
+                currentScene = templateLibrary.loadTemplate(id);
+                activeTemplateId = id;
+                activePresetIdx = (e != null) ? e.builtInIndex : -1;
+                currentProjectFile = null;
+                selectedCompIdx = 0;
+                selectedElemIdx = (currentScene.getEntryCount() > 0 && currentScene.getEntry(0).getEntryCount() > 0) ? 0 : -1;
+                rendererCore.setThemeElements(currentScene);
+                currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
+                warmedPreviewIds.remove(id);
+                previewRefreshPending = true;
+                previewDirtyAtNs = System.nanoTime();
+                statusMessage = "Loaded " + (e != null ? e.title : id);
+            }
+        } catch (Exception ex) {
+            statusMessage = "Template load failed: " + ex.getMessage();
+            ex.printStackTrace();
+        }
+    }
+
+    private void importIntoLibraryAndSelect(File f) {
+        inspector.getColorPicker().cancel();
+        try {
+            if (templateLibrary != null) {
+                templateLibrary.flushPendingSavesSync(1000L);
+                TemplateLibraryStore.TemplateEntry imported = templateLibrary.importTemplateFile(f, null);
+                loadTemplateFromLibrary(imported.id);
+                statusMessage = "Imported " + imported.title + " into library";
+            }
+        } catch (Exception ex) {
+            statusMessage = "Import failed: " + ex.getMessage();
+            ex.printStackTrace();
+        }
+    }
+
+    private void triggerAutoSave() {
+        if (templateLibrary == null || activeTemplateId == null || currentScene == null) return;
+        templateLibrary.scheduleAutoSave(activeTemplateId, currentScene,
+                com.daaw.avee.comp.AppPreferences.AppPreferences.getActiveWorkspaceFolder());
+        previewDirtyAtNs = System.nanoTime();
+        previewRefreshPending = true;
     }
 
     private void saveVizFile(File outFile) {
@@ -972,6 +1233,7 @@ public class AveeEditorApp extends Application implements SceneHost {
         if (refreshSchema) {
             currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
         }
+        triggerAutoSave();
     }
 
     private void addComposition() {
@@ -982,6 +1244,7 @@ public class AveeEditorApp extends Application implements SceneHost {
         currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
         selectedCompIdx = Math.max(0, currentScene.getEntryCount() - 1);
         selectedElemIdx = -1;
+        triggerAutoSave();
         statusMessage = "Added Composition " + selectedCompIdx;
     }
 
@@ -1007,6 +1270,7 @@ public class AveeEditorApp extends Application implements SceneHost {
             selectedElemIdx = -1;
         }
         rendererCore.triggerHighlightByIndices(selectedCompIdx, selectedElemIdx);
+        triggerAutoSave();
         statusMessage = "Added " + typeName;
     }
 
@@ -1019,6 +1283,7 @@ public class AveeEditorApp extends Application implements SceneHost {
         rendererCore.setThemeElements(currentScene);
         currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
         selectedElemIdx = currentScene.getEntry(selectedCompIdx).getEntryCount() - 1;
+        triggerAutoSave();
         statusMessage = "Duplicated element";
     }
 
@@ -1183,6 +1448,7 @@ public class AveeEditorApp extends Application implements SceneHost {
             selectedCompIdx = 0;
         }
         rendererCore.triggerHighlightByIndices(selectedCompIdx, -1);
+        triggerAutoSave();
         statusMessage = "Moved Composition " + srcIdx + " -> Composition " + selectedCompIdx;
     }
 
@@ -1211,6 +1477,7 @@ public class AveeEditorApp extends Application implements SceneHost {
             selectedElemIdx = -1;
         }
         rendererCore.triggerHighlightByIndices(selectedCompIdx, selectedElemIdx);
+        triggerAutoSave();
         statusMessage = (srcCompIdx != dstCompIdx) ? ("Moved layer to Composition " + dstCompIdx) : "Reordered layer";
     }
 
@@ -1225,6 +1492,7 @@ public class AveeEditorApp extends Application implements SceneHost {
                 int newCount = currentScene.getEntry(selectedCompIdx) != null
                         ? currentScene.getEntry(selectedCompIdx).getEntryCount() : 0;
                 selectedElemIdx = newCount > 0 ? Math.min(selectedElemIdx, newCount - 1) : -1;
+                triggerAutoSave();
                 statusMessage = "Deleted layer";
             }
         } else if (selectedCompIdx == 0) {
@@ -1237,6 +1505,7 @@ public class AveeEditorApp extends Application implements SceneHost {
                 currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
                 selectedCompIdx = Math.max(0, Math.min(deletedIdx - 1, currentScene.getEntryCount() - 1));
                 selectedElemIdx = -1;
+                triggerAutoSave();
                 statusMessage = "Deleted Composition " + deletedIdx
                         + (moved > 0 ? " (merged " + moved + " layer" + (moved == 1 ? "" : "s")
                         + " into Composition " + (deletedIdx - 1) + ")" : "");
@@ -1530,12 +1799,14 @@ public class AveeEditorApp extends Application implements SceneHost {
             if (rebuildElements) rendererCore.setThemeElements(scene);
             else rendererCore.setThemeCustomizationData(scene);
         }
+        triggerAutoSave();
     }
 
     @Override
     public void refreshLiveScene() {
         if (rendererCore != null) {
             currentScene = VizArchiveManager.readLiveScene(currentScene, rendererCore, null);
+            triggerAutoSave();
         }
     }
 

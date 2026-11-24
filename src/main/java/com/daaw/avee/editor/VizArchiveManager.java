@@ -38,11 +38,18 @@ public class VizArchiveManager {
     }
 
     public static CustomScene loadFile(File file) throws IOException {
+        File ws = Files.createTempDirectory("avee_ws_").toFile();
+        AppPreferences.setActiveWorkspaceFolder(ws);
+        return loadFileIntoWorkspace(file, ws);
+    }
+
+    public static CustomScene loadFileIntoWorkspace(File file, File workspaceDir) throws IOException {
         if (file == null || !file.exists()) {
             throw new IOException("File does not exist");
         }
-        File ws = Files.createTempDirectory("avee_ws_").toFile();
-        AppPreferences.setActiveWorkspaceFolder(ws);
+        if (workspaceDir != null) {
+            workspaceDir.mkdirs();
+        }
 
         String lower = file.getName().toLowerCase();
         if (lower.endsWith(".json") || lower.endsWith(".txt")) {
@@ -66,8 +73,8 @@ public class VizArchiveManager {
                     sceneJson = readUtf8(zis, buf);
                 } else if (base.toLowerCase().endsWith(".json") && fallbackJson == null) {
                     fallbackJson = readUtf8(zis, buf);
-                } else {
-                    writeOut(new File(ws, base), zis, buf);
+                } else if (workspaceDir != null) {
+                    writeOut(new File(workspaceDir, base), zis, buf);
                 }
                 zis.closeEntry();
             }
@@ -87,6 +94,10 @@ public class VizArchiveManager {
     }
 
     public static void saveViz(File outZip, CustomScene scene, RendererCore rendererCore) throws IOException {
+        saveVizFromWorkspace(outZip, scene, rendererCore, AppPreferences.getActiveWorkspaceFolder());
+    }
+
+    public static void saveVizFromWorkspace(File outZip, CustomScene scene, RendererCore rendererCore, File workspaceDir) throws IOException {
         final Set<String> deps = new LinkedHashSet<>();
         CustomScene latest = readLiveScene(scene, rendererCore, new IDependencyResourceCounter() {
             @Override
@@ -103,7 +114,7 @@ public class VizArchiveManager {
             deps.add("local:" + m.group(1));
         }
 
-        File ws = AppPreferences.getActiveWorkspaceFolder();
+        File ws = workspaceDir != null ? workspaceDir : AppPreferences.getActiveWorkspaceFolder();
         Set<String> packedNames = new LinkedHashSet<>();
         try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(outZip))) {
             zos.putNextEntry(new ZipEntry("scene.json"));

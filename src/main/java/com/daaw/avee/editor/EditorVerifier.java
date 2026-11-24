@@ -934,6 +934,9 @@ public class EditorVerifier {
         // Part 7 verification: AE AudioProviderAE, AESpectrum (linear freq + L/R + no-AGC) & AEWaveform
         verifyPart7AeAudioProvider(rc, audio, fbo);
 
+        // Part 8 verification: Private template library, off-main-thread auto-save, preview PNG & .viz round-trip
+        verifyPart8TemplateLibraryAndAutoSave(rc, audio, w, h, fbo);
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);
@@ -1799,5 +1802,125 @@ public class EditorVerifier {
         }
         System.out.println("Part 7 verification OK (AudioProviderAE + AESpectrum/AEWaveform ratio="
                 + String.format(java.util.Locale.US, "%.2fx", dynRatio) + ", L/R peak=" + peakLeftBin + "/" + peakRightBin + ")");
+    }
+
+    private static void verifyPart8TemplateLibraryAndAutoSave(RendererCore rc, DesktopAudioEngine audio,
+                                                              int w, int h, int fbo) throws Exception {
+        java.nio.file.Path tmpLibPath = java.nio.file.Files.createTempDirectory("avee_part8_lib_");
+        File tmpLib = tmpLibPath.toFile();
+        TemplateLibraryStore store = new TemplateLibraryStore(tmpLib);
+        try {
+            // 1) Built-in 18 presets initialized privately
+            if (store.getEntries().size() != TemplateLibraryStore.BUILT_IN_COUNT) {
+                throw new AssertionError("Expected 18 built-in presets, got " + store.getEntries().size());
+            }
+
+            // 2) Background off-main-thread auto-save on edits (must execute on AveeTemplateAutoSave worker thread, not main)
+            String callingThread = Thread.currentThread().getName();
+            CustomScene p0 = store.loadTemplate(TemplateLibraryStore.presetId(0));
+            com.daaw.avee.comp.Visualizer.CustomComposition c0 = p0.getEntry(0);
+            com.daaw.avee.comp.Visualizer.CustomPropertiesList markerLayer = c0.createDataEntry();
+            markerLayer.putChildTypeValue("Text");
+            markerLayer.setTagName("AutoSavedTag_Part8");
+            store.scheduleAutoSave(TemplateLibraryStore.presetId(0), p0,
+                    com.daaw.avee.comp.AppPreferences.AppPreferences.getActiveWorkspaceFolder());
+            if (!store.flushPendingSavesSync(3000L)) {
+                throw new AssertionError("Background auto-save timed out");
+            }
+            String workerName = store.getLastSaveThreadName();
+            if (!"AveeTemplateAutoSave".equals(workerName) || callingThread.equals(workerName)) {
+                throw new AssertionError("Expected save on background thread AveeTemplateAutoSave, got " + workerName);
+            }
+
+            // Re-open store from disk (simulating app restart) and confirm edit + lastSelectedId persisted
+            TemplateLibraryStore storeReopened = new TemplateLibraryStore(tmpLib);
+            CustomScene reloadedP0 = storeReopened.loadTemplate(TemplateLibraryStore.presetId(0));
+            boolean foundTag = false;
+            for (int i = 0; i < reloadedP0.getEntry(0).getEntryCount(); i++) {
+                if ("AutoSavedTag_Part8".equals(reloadedP0.getEntry(0).getData(i).getTagName())) {
+                    foundTag = true;
+                    break;
+                }
+            }
+            if (!foundTag || !storeReopened.getEntry(TemplateLibraryStore.presetId(0)).modified) {
+                throw new AssertionError("Auto-saved preset edit did not persist across restart");
+            }
+
+            // Reset built-in preset restores clean factory state
+            CustomScene resetP0 = storeReopened.resetBuiltInPreset(TemplateLibraryStore.presetId(0));
+            if (resetP0.getEntry(0).getEntryCount() >= reloadedP0.getEntry(0).getEntryCount()) {
+                throw new AssertionError("resetBuiltInPreset did not restore original preset elements");
+            }
+            storeReopened.shutdown();
+
+            // 3) Import external .viz with bundled asset -> lives only inside private library dir -> export back to .viz
+            File srcImg = File.createTempFile("avee_part8_asset_", ".png");
+            srcImg.deleteOnExit();
+            java.awt.image.BufferedImage bi = new java.awt.image.BufferedImage(32, 32, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+            java.awt.Graphics2D g = bi.createGraphics();
+            g.setColor(java.awt.Color.CYAN);
+            g.fillRect(0, 0, 32, 32);
+            g.dispose();
+            javax.imageio.ImageIO.write(bi, "png", srcImg);
+
+            File extWs = java.nio.file.Files.createTempDirectory("avee_part8_extws_").toFile();
+            com.daaw.avee.comp.AppPreferences.AppPreferences.setActiveWorkspaceFolder(extWs);
+            String localRef = VizArchiveManager.importLocalAsset(srcImg);
+            CustomScene impSrc = CustomScene.Create();
+            com.daaw.avee.comp.Visualizer.CustomComposition ic = impSrc.createDataEntry();
+            ic.putChildTypeValue("Composition");
+            com.daaw.avee.comp.Visualizer.CustomPropertiesList imgEl = ic.createDataEntry();
+            imgEl.putChildTypeValue("Image");
+            imgEl.putPropertyStringValue("customImage", localRef);
+            File extViz = File.createTempFile("avee_part8_in_", ".viz");
+            extViz.deleteOnExit();
+            VizArchiveManager.saveVizFromWorkspace(extViz, impSrc, null, extWs);
+
+            TemplateLibraryStore.TemplateEntry imported = store.importTemplateFile(extViz, "MySecretTemplate");
+            File bundledInPrivateStore = new File(imported.assetsDir, localRef.substring("local:".length()));
+            if (!imported.dir.getAbsolutePath().startsWith(tmpLib.getAbsolutePath()) || !bundledInPrivateStore.isFile()) {
+                throw new AssertionError("Imported .viz was not unpacked into private library store");
+            }
+
+            // Render live preview PNG off-main-thread into private store preview.png
+            store.loadTemplate(imported.id);
+            rc.setThemeElements(store.loadTemplate(imported.id));
+            for (int f = 0; f < 3; f++) {
+                Looper.drainMainQueue();
+                audio.tickFrame(0.016f);
+                GLES20.setRedirectFramebuffer0(fbo);
+                rc.onDrawFrame(null);
+                GLES20.setRedirectFramebuffer0(0);
+            }
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo);
+            Bitmap snap = GraphicsUtils.savePixels(0, 0, w, h, null);
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+            store.schedulePreviewSave(imported.id, snap.getBufferedImage());
+            if (!store.flushPendingSavesSync(3000L) || !imported.previewFile.isFile()) {
+                throw new AssertionError("Preview PNG save failed");
+            }
+            java.awt.image.BufferedImage thumbCheck = javax.imageio.ImageIO.read(imported.previewFile);
+            if (thumbCheck == null || thumbCheck.getWidth() != TemplateLibraryStore.THUMB_W
+                    || thumbCheck.getHeight() != TemplateLibraryStore.THUMB_H) {
+                throw new AssertionError("Preview thumbnail dimensions mismatch");
+            }
+
+            // Export back out as shareable .viz and verify asset + scene inside
+            File exportedViz = File.createTempFile("avee_part8_out_", ".viz");
+            exportedViz.deleteOnExit();
+            store.exportViz(imported.id, exportedViz, null, null);
+            if (!exportedViz.isFile() || exportedViz.length() < 200) {
+                throw new AssertionError("Exported .viz archive is missing or empty");
+            }
+            CustomScene verifiedOut = VizArchiveManager.loadFile(exportedViz);
+            String outImgRef = verifiedOut.getEntry(0).getData(0).getPropertyString("customImage", "");
+            if (!localRef.equals(outImgRef)) {
+                throw new AssertionError("Exported .viz asset reference mismatch: " + outImgRef);
+            }
+        } finally {
+            store.shutdown();
+        }
+        System.out.println("Part 8 verification OK (private template store, background auto-save on "
+                + "AveeTemplateAutoSave, preview PNG 320x180 & .viz import/export OK)");
     }
 }
