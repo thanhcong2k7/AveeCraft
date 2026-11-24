@@ -3,9 +3,7 @@ package com.daaw.avee.editor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import com.daaw.avee.Common.MultiList;
-import com.daaw.avee.Common.Tuple2;
 import com.daaw.avee.Common.Vec2f;
-import com.daaw.avee.Defines;
 import com.daaw.avee.PlayerCore;
 import com.daaw.avee.comp.AlbumArt.AlbumArtCore;
 import com.daaw.avee.comp.AlbumArt.InternalBitmapLoader;
@@ -20,11 +18,13 @@ import com.daaw.avee.comp.Visualizer.Graphic.GraphicsUtils;
 import com.daaw.avee.headless.VideoFrameDecoder;
 import imgui.ImDrawList;
 import imgui.ImGui;
+import imgui.ImGuiViewport;
+import imgui.flag.ImGuiCol;
+import imgui.flag.ImGuiColorEditFlags;
+import imgui.flag.ImGuiCond;
 import imgui.flag.ImGuiInputTextFlags;
-import imgui.flag.ImGuiKey;
 import imgui.flag.ImGuiSliderFlags;
 import imgui.flag.ImGuiTreeNodeFlags;
-import imgui.type.ImBoolean;
 import imgui.type.ImInt;
 import imgui.type.ImString;
 import java.awt.image.BufferedImage;
@@ -33,6 +33,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -46,6 +47,11 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.util.tinyfd.TinyFileDialogs;
 
 public class PropertyInspectorPanel {
+    private static final float ROW_H = 42.0f;
+    private static final float ASSET_ROW_H = 48.0f;
+    private static final float BOX_H = 28.0f;
+    private static final float BOX_GAP = 5.0f;
+
     private static class ThumbEntry {
         int texId;
         int w;
@@ -53,57 +59,45 @@ public class PropertyInspectorPanel {
         String label;
     }
 
+    private static class PreviewBoxSpec {
+        final String text;
+        final float minWidth;
+        final float maxWidth;
+        final float fillRatio; // < 0 hides mini bar
+        final boolean muted;
+        final boolean accent;
+
+        PreviewBoxSpec(String text, float minWidth, float maxWidth, float fillRatio, boolean muted, boolean accent) {
+            this.text = text != null ? text : "";
+            this.minWidth = minWidth;
+            this.maxWidth = maxWidth;
+            this.fillRatio = fillRatio;
+            this.muted = muted;
+            this.accent = accent;
+        }
+    }
+
     private final Map<String, ThumbEntry> thumbCache = new HashMap<>();
-    private final ImBoolean tmpBool = new ImBoolean();
     private final int[] tmpInt = new int[1];
     private final float[] tmpFloat = new float[1];
     private final float[] tmpFloat2 = new float[2];
     private final float[] tmpColor4 = new float[4];
     private final float[] tmpColor3 = new float[3];
     private final ImInt tmpCombo = new ImInt();
-    private final ImString inlineEditBuf = new ImString(64);
-    private final ImString tmpStr = new ImString(512);
-    private String inlineEditKey = null;
-    private boolean inlineEditBufNeedsInit = false;
-    private boolean inlineEditNeedsFocus = false;
-    private boolean inlineEditSawActive = false;
-    private int inlineEditGraceFrames = 0;
+
+    private final Map<String, ImString> popupBuffers = new HashMap<>();
+    private final ImString popupHexBuf = new ImString(24);
+    private String activePopupUid = null;
+    private float popupAnchorX = 0.0f;
+    private float popupAnchorY = 0.0f;
+    private float activePopupContentW = 340.0f;
+
     private CustomPropertiesList lastInspectedProps = null;
-    private final List<String> currentFrameFieldUids = new ArrayList<>();
-    private final List<String> lastFrameFieldUids = new ArrayList<>();
     private CustomScene activeScene = null;
-    private final float[] rowBounds = new float[3];
     private final ScreenColorPicker colorPicker = new ScreenColorPicker();
 
     public ScreenColorPicker getColorPicker() {
         return colorPicker;
-    }
-
-    private void beginPropertyRowBg() {
-        float minX = ImGui.getCursorScreenPosX() - 4.0f;
-        float minY = ImGui.getCursorScreenPosY();
-        float maxX = ImGui.getCursorScreenPosX() + ImGui.getContentRegionAvailX() + 4.0f;
-        rowBounds[0] = minX;
-        rowBounds[1] = minY;
-        rowBounds[2] = maxX;
-        ImDrawList dl = ImGui.getWindowDrawList();
-        dl.channelsSplit(2);
-        dl.channelsSetCurrent(1);
-    }
-
-    private void endPropertyRowBg() {
-        float maxY = ImGui.getItemRectMaxY();
-        if (maxY < rowBounds[1] + 4.0f) {
-            maxY = ImGui.getCursorScreenPosY();
-        }
-        ImDrawList dl = ImGui.getWindowDrawList();
-        dl.channelsSetCurrent(0);
-        if (ImGui.isWindowHovered()
-                && ImGui.isMouseHoveringRect(rowBounds[0], rowBounds[1] - 2.0f, rowBounds[2], maxY + 2.0f)) {
-            int bgCol = ImGui.getColorU32(0.58f, 0.58f, 0.58f, 0.24f);
-            dl.addRectFilled(rowBounds[0], rowBounds[1] - 2.0f, rowBounds[2], maxY + 2.0f, bgCol, 3.0f);
-        }
-        dl.channelsMerge();
     }
 
     public boolean render(String title, CustomPropertiesList props) {
@@ -114,12 +108,9 @@ public class PropertyInspectorPanel {
         this.activeScene = scene;
         if (props != lastInspectedProps) {
             lastInspectedProps = props;
-            inlineEditKey = null;
-            inlineEditBufNeedsInit = false;
-            inlineEditNeedsFocus = false;
-            inlineEditSawActive = false;
-            inlineEditGraceFrames = 0;
-            lastFrameFieldUids.clear();
+            activePopupUid = null;
+            popupBuffers.clear();
+            popupHexBuf.set("");
         }
         if (props == null) {
             ImGui.textDisabled("Select an Element or Composition to inspect its properties.");
@@ -131,19 +122,12 @@ public class PropertyInspectorPanel {
             ImGui.sameLine();
             ImGui.textDisabled("(v" + ver + ")");
         }
-        ImGui.textDisabled("Tip: Double-click or Ctrl+Click any numeric field to type (Tab saves & advances)");
+        ImGui.textDisabled("Click any property or value box to edit (sliders + manual input)");
         ImGui.separator();
 
-        currentFrameFieldUids.clear();
-        ImGui.pushItemWidth(Math.max(120.0f, ImGui.getContentRegionAvailX() * 0.56f));
-        boolean changed = renderPropertiesGrouped(props, 0, "");
-        ImGui.popItemWidth();
-        lastFrameFieldUids.clear();
-        lastFrameFieldUids.addAll(currentFrameFieldUids);
-        return changed;
+        return renderPropertiesGrouped(props, 0, "");
     }
 
-    @SuppressWarnings("unchecked")
     private boolean renderPropertiesGrouped(CustomPropertiesList props, int depth, String pathPrefix) {
         boolean changed = false;
         Map<String, MultiList<String, Integer>> grouped = props.GetAllPropertiesGroupedSortedByOrder();
@@ -197,344 +181,191 @@ public class PropertyInspectorPanel {
         String kind = parts[0];
 
         if ("b".equals(kind) || "pb".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                tmpBool.set(props.getPropertyBool(key, false));
-                if (ImGui.checkbox(key, tmpBool)) {
-                    props.putPropertyBoolValue(key, tmpBool.get());
-                    return true;
-                }
-                return false;
-            } finally {
-                endPropertyRowBg();
+            boolean cur = props.getPropertyBool(key, false);
+            PreviewBoxSpec pill = new PreviewBoxSpec(cur ? "ON" : "OFF", 52.0f, 64.0f, -1.0f, !cur, cur);
+            if (renderPropertyRowWithBoxes(uid, key, Collections.singletonList(pill), false)) {
+                props.putPropertyBoolValue(key, !cur);
+                return true;
             }
+            return false;
         }
 
         if ("i".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                int min = parts.length >= 2 ? parseIntSafe(parts[1], 0) : 0;
-                int max = parts.length >= 3 ? parseIntSafe(parts[2], 100) : 100;
-                if ("sourceCompositionIndex".equals(key) && activeScene != null) {
-                    int compCount = activeScene.getEntryCount();
-                    int cur = props.getPropertyInt(key, 1);
-                    if (compCount > 1) {
-                        String[] compLabels = new String[compCount - 1];
-                        for (int i = 0; i < compLabels.length; i++) {
-                            compLabels[i] = "Composition " + (i + 1);
-                        }
-                        int sel = (cur >= 1 && cur < compCount) ? (cur - 1) : 0;
-                        tmpCombo.set(sel);
-                        boolean ch = ImGui.combo(key + "##compidx", tmpCombo, compLabels);
-                        if (cur < 1 || cur >= compCount) {
-                            ImGui.textDisabled("(current value " + cur + " is out of range 1.." + (compCount - 1) + ")");
-                        }
-                        if (ch) {
-                            props.putPropertyIntValue(key, tmpCombo.get() + 1);
-                            return true;
-                        }
-                        return false;
-                    } else {
-                        ImGui.textDisabled(key + ": no offscreen compositions (click + Comp)");
-                        max = Math.max(5, max);
+            int min = parts.length >= 2 ? parseIntSafe(parts[1], 0) : 0;
+            int max = parts.length >= 3 ? parseIntSafe(parts[2], 100) : 100;
+            if ("sourceCompositionIndex".equals(key) && activeScene != null) {
+                int compCount = activeScene.getEntryCount();
+                int cur = props.getPropertyInt(key, 1);
+                if (compCount > 1) {
+                    String preview = (cur >= 1 && cur < compCount)
+                            ? ("Comp " + cur)
+                            : ("Comp " + cur + " (!)");
+                    PreviewBoxSpec box = new PreviewBoxSpec(preview, 72.0f, 150.0f, -1.0f, cur < 1 || cur >= compCount, true);
+                    String popId = "##pop_" + uid;
+                    if (renderPropertyRowWithBoxes(uid, key, Collections.singletonList(box), ImGui.isPopupOpen(popId))) {
+                        openPropertyPopup(uid);
                     }
+                    boolean changed = false;
+                    if (beginAnchoredPropertyPopup(uid, 290.0f, Math.min(260.0f, compCount * 30.0f + 56.0f))) {
+                        renderPopupHeader(key, "1.." + (compCount - 1));
+                        for (int ci = 1; ci < compCount; ci++) {
+                            if (ImGui.selectable("Composition " + ci + "##comp_" + ci, cur == ci)) {
+                                props.putPropertyIntValue(key, ci);
+                                changed = true;
+                                ImGui.closeCurrentPopup();
+                            }
+                        }
+                        ImGui.endPopup();
+                    }
+                    return changed;
                 }
-                tmpInt[0] = props.getPropertyInt(key, min);
-                if (editIntField(key, uid, tmpInt, min, max)) {
-                    props.putPropertyIntValue(key, tmpInt[0]);
-                    return true;
-                }
+                PreviewBoxSpec emptyBox = new PreviewBoxSpec("No Offscreen Comp", 120.0f, 180.0f, -1.0f, true, false);
+                renderPropertyRowWithBoxes(uid, key + " (+ Comp)", Collections.singletonList(emptyBox), false);
                 return false;
-            } finally {
-                endPropertyRowBg();
             }
+
+            tmpInt[0] = props.getPropertyInt(key, min);
+            float fill = computePreviewBarFillRatio((float) tmpInt[0], (float) min, (float) max);
+            PreviewBoxSpec box = new PreviewBoxSpec(Integer.toString(tmpInt[0]), 54.0f, 110.0f, fill, false, false);
+            String popId = "##pop_" + uid;
+            if (renderPropertyRowWithBoxes(uid, key, Collections.singletonList(box), ImGui.isPopupOpen(popId))) {
+                openPropertyPopup(uid);
+            }
+            boolean changed = false;
+            if (beginAnchoredPropertyPopup(uid, 360.0f, 92.0f)) {
+                renderPopupHeader(key, min + " .. " + max);
+                if (renderPopupIntSliderAndInput(uid + "#0", null, tmpInt, min, max)) {
+                    props.putPropertyIntValue(key, tmpInt[0]);
+                    changed = true;
+                }
+                ImGui.endPopup();
+            }
+            return changed;
         }
 
         if ("f".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                float min = parts.length >= 2 ? parseFloatSafe(parts[1], 0f) : 0f;
-                float max = parts.length >= 3 ? parseFloatSafe(parts[2], 1f) : 1f;
-                tmpFloat[0] = props.getPropertyFloat(key, min);
-                if (editFloatField(key, uid, tmpFloat, min, max)) {
-                    props.putPropertyFloatValue(key, tmpFloat[0]);
-                    return true;
-                }
-                return false;
-            } finally {
-                endPropertyRowBg();
+            float min = parts.length >= 2 ? parseFloatSafe(parts[1], 0f) : 0f;
+            float max = parts.length >= 3 ? parseFloatSafe(parts[2], 1f) : 1f;
+            float step = computeNiceFloatStep(min, max);
+            tmpFloat[0] = props.getPropertyFloat(key, min);
+            float fill = computePreviewBarFillRatio(tmpFloat[0], min, max);
+            PreviewBoxSpec box = new PreviewBoxSpec(formatPreviewFloat(tmpFloat[0], step), 56.0f, 110.0f, fill, false, false);
+            String popId = "##pop_" + uid;
+            if (renderPropertyRowWithBoxes(uid, key, Collections.singletonList(box), ImGui.isPopupOpen(popId))) {
+                openPropertyPopup(uid);
             }
+            boolean changed = false;
+            if (beginAnchoredPropertyPopup(uid, 360.0f, 92.0f)) {
+                renderPopupHeader(key, formatPreviewFloat(min, step) + " .. " + formatPreviewFloat(max, step));
+                if (renderPopupFloatSliderAndInput(uid + "#0", null, tmpFloat, 0, min, max, step)) {
+                    props.putPropertyFloatValue(key, tmpFloat[0]);
+                    changed = true;
+                }
+                ImGui.endPopup();
+            }
+            return changed;
         }
 
         if ("f2".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                float min = parts.length >= 2 ? parseFloatSafe(parts[1], -1f) : -1f;
-                float max = parts.length >= 3 ? parseFloatSafe(parts[2], 1f) : 1f;
-                Vec2f v = props.getPropertyVec2f(key, new Vec2f(0f, 0f));
-                tmpFloat2[0] = v.x;
-                tmpFloat2[1] = v.y;
-                float speed = Math.max(0.002f, (max - min) * 0.003f);
-                if (editFloat2Field(key, uid, tmpFloat2, speed, min, max)) {
-                    props.putPropertyVec2fValue(key, new Vec2f(tmpFloat2[0], tmpFloat2[1]));
-                    return true;
-                }
-                return false;
-            } finally {
-                endPropertyRowBg();
+            float min = parts.length >= 2 ? parseFloatSafe(parts[1], -1f) : -1f;
+            float max = parts.length >= 3 ? parseFloatSafe(parts[2], 1f) : 1f;
+            float step = computeNiceFloatStep(min, max);
+            Vec2f v = props.getPropertyVec2f(key, new Vec2f(0f, 0f));
+            tmpFloat2[0] = v.x;
+            tmpFloat2[1] = v.y;
+            List<PreviewBoxSpec> boxes = new ArrayList<>(2);
+            boxes.add(new PreviewBoxSpec(formatPreviewFloat(tmpFloat2[0], step), 54.0f, 94.0f,
+                    computePreviewBarFillRatio(tmpFloat2[0], min, max), false, false));
+            boxes.add(new PreviewBoxSpec(formatPreviewFloat(tmpFloat2[1], step), 54.0f, 94.0f,
+                    computePreviewBarFillRatio(tmpFloat2[1], min, max), false, false));
+            String popId = "##pop_" + uid;
+            if (renderPropertyRowWithBoxes(uid, key, boxes, ImGui.isPopupOpen(popId))) {
+                openPropertyPopup(uid);
             }
+            boolean changed = false;
+            if (beginAnchoredPropertyPopup(uid, 380.0f, 130.0f)) {
+                renderPopupHeader(key, formatPreviewFloat(min, step) + " .. " + formatPreviewFloat(max, step));
+                boolean chX = renderPopupFloatSliderAndInput(uid + "#0", "X", tmpFloat2, 0, min, max, step);
+                boolean chY = renderPopupFloatSliderAndInput(uid + "#1", "Y", tmpFloat2, 1, min, max, step);
+                if (chX || chY) {
+                    props.putPropertyVec2fValue(key, new Vec2f(tmpFloat2[0], tmpFloat2[1]));
+                    changed = true;
+                }
+                ImGui.endPopup();
+            }
+            return changed;
         }
 
         if ("crgba".equals(kind) || "crgb".equals(kind) || "crgb_hl".equals(kind)
                 || "chsla4f".equals(kind) || "chsl4f".equals(kind) || "crgba4f".equals(kind) || "crgb4f".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                return editColorPropertyWithEyedropper(props, key, kind, uid);
-            } finally {
-                endPropertyRowBg();
-            }
+            return renderColorPropertyRowAndPopup(props, key, kind, uid);
         }
 
         if ("sel".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                String cur = props.getPropertySelectString(key, "");
-                int n = Math.max(0, parts.length - 1);
-                String[] opts = new String[n];
-                int idx = 0;
+            String cur = props.getPropertySelectString(key, "");
+            int n = Math.max(0, parts.length - 1);
+            String[] opts = new String[n];
+            for (int i = 0; i < n; i++) {
+                opts[i] = parts[i + 1];
+            }
+            PreviewBoxSpec box = new PreviewBoxSpec(
+                    cur.isEmpty() ? "(select) v" : (cur + "  v"), 84.0f, 175.0f, -1.0f, cur.isEmpty(), true);
+            String popId = "##pop_" + uid;
+            if (renderPropertyRowWithBoxes(uid, key, Collections.singletonList(box), ImGui.isPopupOpen(popId))) {
+                openPropertyPopup(uid);
+            }
+            boolean changed = false;
+            if (n > 0 && beginAnchoredPropertyPopup(uid, 270.0f, Math.min(280.0f, n * 28.0f + 54.0f))) {
+                renderPopupHeader(key, n + " options");
                 for (int i = 0; i < n; i++) {
-                    opts[i] = parts[i + 1];
-                    if (opts[i].equals(cur)) idx = i;
-                }
-                if (n > 0) {
-                    tmpCombo.set(idx);
-                    if (ImGui.combo(key, tmpCombo, opts)) {
-                        props.putPropertySelectStringValue(key, opts[tmpCombo.get()]);
-                        return true;
+                    if (ImGui.selectable(opts[i] + "##sel_" + i, opts[i].equals(cur))) {
+                        props.putPropertySelectStringValue(key, opts[i]);
+                        changed = true;
+                        ImGui.closeCurrentPopup();
                     }
                 }
-                return false;
-            } finally {
-                endPropertyRowBg();
+                ImGui.endPopup();
             }
+            return changed;
         }
 
         if ("txt".equals(kind) || "ptxt".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                String cur = props.getPropertyString(key, "");
-                tmpStr.set(cur != null ? cur : "");
-                if (ImGui.inputText(key, tmpStr)) {
-                    props.putPropertyStringValue(key, tmpStr.get());
-                    return true;
-                }
-                return false;
-            } finally {
-                endPropertyRowBg();
+            String cur = props.getPropertyString(key, "");
+            if (cur == null) cur = "";
+            String singleLinePreview = cur.replace('\r', ' ').replace('\n', ' ').trim();
+            if (singleLinePreview.isEmpty()) singleLinePreview = "(empty)";
+            PreviewBoxSpec box = new PreviewBoxSpec(singleLinePreview, 100.0f, 200.0f, -1.0f, cur.isEmpty(), false);
+            String popId = "##pop_" + uid;
+            if (renderPropertyRowWithBoxes(uid, key, Collections.singletonList(box), ImGui.isPopupOpen(popId))) {
+                openPropertyPopup(uid);
+                popupBuffers.put(uid + "#txt", new ImString(cur, 1024));
             }
+            boolean changed = false;
+            if (beginAnchoredPropertyPopup(uid, 420.0f, 152.0f)) {
+                renderPopupHeader(key, "Text Input");
+                ImString buf = getPopupBuffer(uid + "#txt", cur, 1024);
+                if (ImGui.inputTextMultiline("##mtxt_" + uid, buf, activePopupContentW, 82.0f)) {
+                    props.putPropertyStringValue(key, buf.get());
+                    changed = true;
+                }
+                if (ImGui.button("Done##done_" + uid, 80.0f, 0.0f)) {
+                    ImGui.closeCurrentPopup();
+                }
+                ImGui.endPopup();
+            }
+            return changed;
         }
 
         if ("img".equals(kind) || "pimg".equals(kind) || "asset".equals(kind) || "passet".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                boolean isModified = false;
-                String cur = props.getPropertyString(key, "");
-                if (cur == null) cur = "";
-                boolean isFont = "typeFace".equals(key);
-                boolean isVideoOnly = "customVideo".equals(key);
-                boolean isMask = "MaskImage".equals(key);
-                boolean allowCompositions = !isFont && !isVideoOnly && hasCompositionSentinel(parts);
-                int compCount = activeScene != null ? activeScene.getEntryCount() : 0;
-
-                ImGui.text(isMask ? (key + " (Alpha Mask)") : key);
-                tmpStr.set(cur);
-                if (ImGui.inputText("Path##path_" + key, tmpStr)) {
-                    props.putPropertyStringValue(key, tmpStr.get());
-                    isModified = true;
-                }
-
-                List<String> optList = buildMediaOptions(parts, isFont, isVideoOnly, compCount);
-                if (!optList.isEmpty()) {
-                    String[] displayOpts = new String[optList.size() + 1];
-                    displayOpts[0] = isFont ? "(select font / media...)" : "(select integrated / workspace media...)";
-                    String normalizedCur = cur;
-                    if (isFont && normalizedCur.startsWith("internal_") && normalizedCur.indexOf(':') > 0) {
-                        normalizedCur = normalizedCur.substring(0, normalizedCur.indexOf(':'));
-                    }
-                    int selIdx = 0;
-                    for (int i = 0; i < optList.size(); i++) {
-                        String val = optList.get(i);
-                        displayOpts[i + 1] = formatMediaOptionLabel(val, isFont);
-                        if (val.equals(cur) || val.equals(normalizedCur)) {
-                            selIdx = i + 1;
-                        }
-                    }
-                    tmpCombo.set(selIdx);
-                    if (ImGui.combo("Media##preset_" + key, tmpCombo, displayOpts) && tmpCombo.get() > 0) {
-                        props.putPropertyStringValue(key, optList.get(tmpCombo.get() - 1));
-                        isModified = true;
-                    }
-                }
-                if (allowCompositions && compCount <= 1) {
-                    ImGui.textDisabled("Tip: Click '+ Comp' to create a Composition to link here.");
-                }
-
-                String browseLabel = isFont ? "Browse Font...##" + key
-                        : (isVideoOnly ? "Browse Video...##" + key
-                        : (isMask ? "Browse Alpha Mask...##" + key : "Browse Image / Video...##" + key));
-                if (ImGui.button(browseLabel)) {
-                    File picked = openAssetFileDialog(isFont, isVideoOnly);
-                    if (picked != null) {
-                        try {
-                            String localRef = VizArchiveManager.importLocalAsset(picked);
-                            props.putPropertyStringValue(key, localRef);
-                            thumbCache.remove(localRef);
-                            isModified = true;
-                        } catch (Exception e) {
-                            e.printStackTrace();
-                        }
-                    }
-                }
-                ImGui.sameLine();
-                if (ImGui.button("Clear##" + key)) {
-                    props.putPropertyStringValue(key, "");
-                    isModified = true;
-                }
-
-                if (!isFont && !cur.isEmpty()) {
-                    ThumbEntry thumb = getOrLoadThumbnail(cur);
-                    if (thumb != null) {
-                        ImGui.textDisabled(thumb.label);
-                        if (thumb.texId != 0) {
-                            float scale = Math.min(180f / Math.max(1, thumb.w), 96f / Math.max(1, thumb.h));
-                            float tw = Math.max(16f, thumb.w * scale);
-                            float th = Math.max(16f, thumb.h * scale);
-                            ImGui.image(thumb.texId, tw, th, 0f, 0f, 1f, 1f);
-                        }
-                    }
-                }
-                return isModified;
-            } finally {
-                endPropertyRowBg();
-            }
+            return renderAssetPropertyRowAndPopup(props, key, parts, uid);
         }
 
         if ("mvarf".equals(kind) || "mvarf2".equals(kind)) {
-            boolean isModified = false;
-            MVariableFloat mv = props.getPropertyMVariableFloat(key, MVariableFloat.CreateConstantFloat(0f));
-            boolean is2d = "mvarf2".equals(kind);
-            float min = parts.length >= 2 ? parseFloatSafe(parts[1], -10f) : -10f;
-            float max = parts.length >= 3 ? parseFloatSafe(parts[2], 10f) : 10f;
-            float speed = Math.max(0.002f, (max - min) * 0.003f);
-            boolean mvarOpen;
-            beginPropertyRowBg();
-            try {
-                mvarOpen = ImGui.treeNodeEx(key + "##mvar", ImGuiTreeNodeFlags.DefaultOpen);
-            } finally {
-                endPropertyRowBg();
-            }
-            if (mvarOpen) {
-                String[] opts = is2d ? MeasureDefs.measures2dMVar : MeasureDefs.measures1dMVar;
-                int count = mv.getMeasuredVarCount();
-                for (int mIdx = 0; mIdx < count; mIdx++) {
-                    ImGui.pushID(mIdx);
-                    beginPropertyRowBg();
-                    try {
-                        MeasuredVar m = mv.getMeasuredVar(mIdx);
-                        int selIdx = 0;
-                        for (int j = 0; j < opts.length; j++) {
-                            if (opts[j].equals(m.getMeasure())) {
-                                selIdx = j;
-                                break;
-                            }
-                        }
-                        tmpCombo.set(selIdx);
-                        String curMeasure = m.getMeasure();
-                        Vec2f arg = m.getMeasureArgVec2f();
-                        tmpFloat2[0] = arg.x;
-                        tmpFloat2[1] = arg.y;
-                        boolean rowChanged = false;
-                        if (ImGui.combo("Source", tmpCombo, opts)) {
-                            curMeasure = opts[tmpCombo.get()];
-                            rowChanged = true;
-                        }
-                        MeasureDefs.MeasureDef def = MeasureDefs.getMeasureDefByName(curMeasure);
-                        boolean showB = (def == null) || is2d || def.isBUsedFor1d;
-                        if (showB) {
-                            String aHint = (def != null && !def.argAHint.isEmpty()) ? def.argAHint : "X";
-                            String bHint = (def != null && !def.argBHint.isEmpty()) ? def.argBHint : "Y";
-                            if (editFloat2Field("Amount (" + aHint + " / " + bHint + ")", uid + "/mv" + mIdx, tmpFloat2, speed, min, max)) {
-                                rowChanged = true;
-                            }
-                        } else {
-                            String aHint = (def != null && !def.argAHint.isEmpty()) ? def.argAHint : "Amount";
-                            tmpFloat[0] = tmpFloat2[0];
-                            if (editFloatField(aHint, uid + "/mv" + mIdx, tmpFloat, min, max)) {
-                                tmpFloat2[0] = tmpFloat[0];
-                                rowChanged = true;
-                            }
-                        }
-                        if (rowChanged) {
-                            mv.setMeasuredVar(mIdx, new MeasuredVar(curMeasure, tmpFloat2[0], tmpFloat2[1]));
-                            props.putPropertyMVariableFloatValue(key, mv);
-                            isModified = true;
-                        }
-                    } finally {
-                        endPropertyRowBg();
-                    }
-                    ImGui.popID();
-                }
-                if (ImGui.button("+ Term##add_" + key)) {
-                    props.putPropertyMVariableFloatValue(key, new MVariableFloat(mv, new MeasuredVar(MeasureDefs.Constant, min, min)));
-                    isModified = true;
-                }
-                if (count > 1) {
-                    ImGui.sameLine();
-                    if (ImGui.button("- Term##rem_" + key)) {
-                        props.putPropertyMVariableFloatValue(key, new MVariableFloat(mv, 0, count - 1));
-                        isModified = true;
-                    }
-                }
-                ImGui.treePop();
-            }
-            return isModified;
+            return renderMVarPropertyRowAndPopup(props, key, parts, kind, uid);
         }
 
         if ("mea".equals(kind)) {
-            beginPropertyRowBg();
-            try {
-                MeasuredVar m = props.getPropertyMeasuredVar(key, MeasuredVar.AsNothing());
-                if (m != null) {
-                    String[] opts = MeasureDefs.measures1d;
-                    int selIdx = 0;
-                    for (int j = 0; j < opts.length; j++) {
-                        if (opts[j].equals(m.getMeasure())) {
-                            selIdx = j;
-                            break;
-                        }
-                    }
-                    tmpCombo.set(selIdx);
-                    String curMeasure = m.getMeasure();
-                    Vec2f arg = m.getMeasureArgVec2f();
-                    tmpFloat2[0] = arg.x;
-                    tmpFloat2[1] = arg.y;
-                    boolean mod = false;
-                    if (ImGui.combo(key + " Source", tmpCombo, opts)) {
-                        curMeasure = opts[tmpCombo.get()];
-                        mod = true;
-                    }
-                    if (editFloat2Field(key + " Arg", uid + "/arg", tmpFloat2, 0.01f, -10f, 10f)) {
-                        mod = true;
-                    }
-                    if (mod) {
-                        props.putPropertyMeasuredVar(key, new MeasuredVar(curMeasure, tmpFloat2[0], tmpFloat2[1]));
-                        return true;
-                    }
-                }
-                return false;
-            } finally {
-                endPropertyRowBg();
-            }
+            return renderMeasuredVarPropertyRowAndPopup(props, key, uid);
         }
 
         if ("_child".equals(kind)) {
@@ -543,31 +374,27 @@ public class PropertyInspectorPanel {
                 boolean childChanged = false;
                 String curType = child.getTypeName();
                 String headerLabel = key + (curType.isEmpty() ? "" : (" [" + curType + "]"));
-                boolean childOpen;
-                beginPropertyRowBg();
-                try {
-                    childOpen = ImGui.treeNodeEx(headerLabel + "##child_" + depth + "_" + key,
-                            depth == 0 ? ImGuiTreeNodeFlags.DefaultOpen : 0);
-                } finally {
-                    endPropertyRowBg();
-                }
+                boolean childOpen = ImGui.treeNodeEx(headerLabel + "##child_" + depth + "_" + key,
+                        depth == 0 ? ImGuiTreeNodeFlags.DefaultOpen : 0);
                 if (childOpen) {
                     if (parts.length > 1) {
-                        beginPropertyRowBg();
-                        try {
-                            String[] typeOpts = new String[parts.length - 1];
-                            int selIdx = 0;
+                        PreviewBoxSpec typeBox = new PreviewBoxSpec(
+                                curType.isEmpty() ? "(none) v" : (curType + "  v"), 84.0f, 175.0f, -1.0f, false, true);
+                        String childTypeUid = uid + "/_type";
+                        String popId = "##pop_" + childTypeUid;
+                        if (renderPropertyRowWithBoxes(childTypeUid, "Type", Collections.singletonList(typeBox), ImGui.isPopupOpen(popId))) {
+                            openPropertyPopup(childTypeUid);
+                        }
+                        if (beginAnchoredPropertyPopup(childTypeUid, 270.0f, Math.min(260.0f, (parts.length - 1) * 28.0f + 54.0f))) {
+                            renderPopupHeader(key + " Type", (parts.length - 1) + " options");
                             for (int i = 1; i < parts.length; i++) {
-                                typeOpts[i - 1] = parts[i];
-                                if (parts[i].equals(curType)) selIdx = i - 1;
+                                if (ImGui.selectable(parts[i] + "##ctype_" + i, parts[i].equals(curType))) {
+                                    child.putChildTypeValue(parts[i]);
+                                    childChanged = true;
+                                    ImGui.closeCurrentPopup();
+                                }
                             }
-                            tmpCombo.set(selIdx);
-                            if (ImGui.combo("Type##" + key, tmpCombo, typeOpts)) {
-                                child.putChildTypeValue(typeOpts[tmpCombo.get()]);
-                                childChanged = true;
-                            }
-                        } finally {
-                            endPropertyRowBg();
+                            ImGui.endPopup();
                         }
                     }
                     if (renderPropertiesGrouped(child, depth + 1, uid)) {
@@ -581,7 +408,170 @@ public class PropertyInspectorPanel {
         return false;
     }
 
-    private boolean editColorPropertyWithEyedropper(CustomPropertiesList props, String key, String kind, String uid) {
+    private boolean renderMVarPropertyRowAndPopup(CustomPropertiesList props, String key, String[] parts,
+                                                  String kind, String uid) {
+        MVariableFloat mv = props.getPropertyMVariableFloat(key, MVariableFloat.CreateConstantFloat(0f));
+        boolean is2d = "mvarf2".equals(kind);
+        float min = parts.length >= 2 ? parseFloatSafe(parts[1], -10f) : -10f;
+        float max = parts.length >= 3 ? parseFloatSafe(parts[2], 10f) : 10f;
+        float step = computeNiceFloatStep(min, max);
+        int count = mv.getMeasuredVarCount();
+
+        List<PreviewBoxSpec> boxes = new ArrayList<>();
+        if (count > 0) {
+            MeasuredVar m0 = mv.getMeasuredVar(0);
+            String mName = m0.getMeasure();
+            if (!MeasureDefs.Constant.equals(mName) && !MeasureDefs.Nothing.equals(mName)) {
+                boxes.add(new PreviewBoxSpec(mName, 44.0f, 86.0f, -1.0f, false, true));
+            }
+            MeasureDefs.MeasureDef def0 = MeasureDefs.getMeasureDefByName(mName);
+            boolean showB0 = (def0 == null) || is2d || def0.isBUsedFor1d;
+            Vec2f arg0 = m0.getMeasureArgVec2f();
+            boxes.add(new PreviewBoxSpec(formatPreviewFloat(arg0.x, step), 50.0f, 84.0f,
+                    computePreviewBarFillRatio(arg0.x, min, max), false, false));
+            if (showB0) {
+                boxes.add(new PreviewBoxSpec(formatPreviewFloat(arg0.y, step), 50.0f, 84.0f,
+                        computePreviewBarFillRatio(arg0.y, min, max), false, false));
+            }
+            if (count > 1) {
+                boxes.add(new PreviewBoxSpec("+" + (count - 1), 30.0f, 44.0f, -1.0f, false, true));
+            }
+        }
+
+        String popId = "##pop_" + uid;
+        if (renderPropertyRowWithBoxes(uid, key, boxes, ImGui.isPopupOpen(popId))) {
+            openPropertyPopup(uid);
+        }
+
+        boolean isModified = false;
+        float estH = 90.0f + Math.max(1, count) * (is2d ? 116.0f : 96.0f);
+        if (beginAnchoredPropertyPopup(uid, 430.0f, Math.min(460.0f, estH))) {
+            renderPopupHeader(key, formatPreviewFloat(min, step) + " .. " + formatPreviewFloat(max, step));
+
+            String[] opts = is2d ? MeasureDefs.measures2dMVar : MeasureDefs.measures1dMVar;
+            int termCount = mv.getMeasuredVarCount();
+            for (int mIdx = 0; mIdx < termCount; mIdx++) {
+                ImGui.pushID(mIdx);
+                if (mIdx > 0) ImGui.separator();
+                MeasuredVar m = mv.getMeasuredVar(mIdx);
+                int selIdx = 0;
+                for (int j = 0; j < opts.length; j++) {
+                    if (opts[j].equals(m.getMeasure())) {
+                        selIdx = j;
+                        break;
+                    }
+                }
+                tmpCombo.set(selIdx);
+                String curMeasure = m.getMeasure();
+                Vec2f arg = m.getMeasureArgVec2f();
+                tmpFloat2[0] = arg.x;
+                tmpFloat2[1] = arg.y;
+                boolean rowChanged = false;
+                if (termCount > 1) {
+                    ImGui.textDisabled("Term " + (mIdx + 1));
+                }
+                ImGui.setNextItemWidth(activePopupContentW);
+                if (ImGui.combo("##src_" + mIdx, tmpCombo, opts)) {
+                    curMeasure = opts[tmpCombo.get()];
+                    rowChanged = true;
+                }
+                MeasureDefs.MeasureDef def = MeasureDefs.getMeasureDefByName(curMeasure);
+                boolean showB = (def == null) || is2d || def.isBUsedFor1d;
+                if (showB) {
+                    String aHint = (def != null && !def.argAHint.isEmpty()) ? def.argAHint : "X";
+                    String bHint = (def != null && !def.argBHint.isEmpty()) ? def.argBHint : "Y";
+                    if (renderPopupFloatSliderAndInput(uid + "/mv" + mIdx + "#0", aHint, tmpFloat2, 0, min, max, step)) {
+                        rowChanged = true;
+                    }
+                    if (renderPopupFloatSliderAndInput(uid + "/mv" + mIdx + "#1", bHint, tmpFloat2, 1, min, max, step)) {
+                        rowChanged = true;
+                    }
+                } else {
+                    String aHint = (def != null && !def.argAHint.isEmpty()) ? def.argAHint : "Amount";
+                    if (renderPopupFloatSliderAndInput(uid + "/mv" + mIdx + "#0", aHint, tmpFloat2, 0, min, max, step)) {
+                        rowChanged = true;
+                    }
+                }
+                if (rowChanged) {
+                    mv.setMeasuredVar(mIdx, new MeasuredVar(curMeasure, tmpFloat2[0], tmpFloat2[1]));
+                    props.putPropertyMVariableFloatValue(key, mv);
+                    isModified = true;
+                }
+                ImGui.popID();
+            }
+
+            ImGui.separator();
+            if (ImGui.button("+ Term##add_" + key)) {
+                props.putPropertyMVariableFloatValue(key,
+                        new MVariableFloat(mv, new MeasuredVar(MeasureDefs.Constant, min, min)));
+                popupBuffers.clear();
+                isModified = true;
+            }
+            if (termCount > 1) {
+                ImGui.sameLine();
+                if (ImGui.button("- Term##rem_" + key)) {
+                    props.putPropertyMVariableFloatValue(key, new MVariableFloat(mv, 0, termCount - 1));
+                    popupBuffers.clear();
+                    isModified = true;
+                }
+            }
+            ImGui.endPopup();
+        }
+        return isModified;
+    }
+
+    private boolean renderMeasuredVarPropertyRowAndPopup(CustomPropertiesList props, String key, String uid) {
+        MeasuredVar m = props.getPropertyMeasuredVar(key, MeasuredVar.AsNothing());
+        if (m == null) m = MeasuredVar.AsNothing();
+        String curMeasure = m.getMeasure();
+        Vec2f arg = m.getMeasureArgVec2f();
+        float step = 0.05f;
+        List<PreviewBoxSpec> boxes = new ArrayList<>(3);
+        boxes.add(new PreviewBoxSpec(curMeasure, 50.0f, 96.0f, -1.0f, MeasureDefs.Nothing.equals(curMeasure), true));
+        boxes.add(new PreviewBoxSpec(formatPreviewFloat(arg.x, step), 46.0f, 76.0f,
+                computePreviewBarFillRatio(arg.x, -10f, 10f), false, false));
+        boxes.add(new PreviewBoxSpec(formatPreviewFloat(arg.y, step), 46.0f, 76.0f,
+                computePreviewBarFillRatio(arg.y, -10f, 10f), false, false));
+
+        String popId = "##pop_" + uid;
+        if (renderPropertyRowWithBoxes(uid, key, boxes, ImGui.isPopupOpen(popId))) {
+            openPropertyPopup(uid);
+        }
+
+        boolean mod = false;
+        if (beginAnchoredPropertyPopup(uid, 410.0f, 168.0f)) {
+            renderPopupHeader(key, "-10.0 .. 10.0");
+            String[] opts = MeasureDefs.measures1d;
+            int selIdx = 0;
+            for (int j = 0; j < opts.length; j++) {
+                if (opts[j].equals(curMeasure)) {
+                    selIdx = j;
+                    break;
+                }
+            }
+            tmpCombo.set(selIdx);
+            ImGui.setNextItemWidth(activePopupContentW);
+            if (ImGui.combo("##msrc_" + uid, tmpCombo, opts)) {
+                curMeasure = opts[tmpCombo.get()];
+                mod = true;
+            }
+            tmpFloat2[0] = arg.x;
+            tmpFloat2[1] = arg.y;
+            if (renderPopupFloatSliderAndInput(uid + "/arg#0", "Arg A", tmpFloat2, 0, -10f, 10f, step)) {
+                mod = true;
+            }
+            if (renderPopupFloatSliderAndInput(uid + "/arg#1", "Arg B", tmpFloat2, 1, -10f, 10f, step)) {
+                mod = true;
+            }
+            if (mod) {
+                props.putPropertyMeasuredVar(key, new MeasuredVar(curMeasure, tmpFloat2[0], tmpFloat2[1]));
+            }
+            ImGui.endPopup();
+        }
+        return mod;
+    }
+
+    private boolean renderColorPropertyRowAndPopup(CustomPropertiesList props, String key, String kind, String uid) {
         boolean isIntColor = "crgba".equals(kind) || "crgb".equals(kind) || "crgb_hl".equals(kind);
         boolean hasAlpha = "crgba".equals(kind) || "crgba4f".equals(kind) || "chsla4f".equals(kind);
         boolean isHsla = "chsla4f".equals(kind) || "chsl4f".equals(kind);
@@ -597,45 +587,127 @@ public class PropertyInspectorPanel {
                 System.arraycopy(raw4, 0, tmpColor4, 0, 4);
             }
         }
+        int curArgb = GraphicsUtils.f4ColorToIntColor(tmpColor4);
+        String hexLabel = formatColorHex(curArgb, hasAlpha);
 
-        float spacing = ImGui.getStyle().getItemInnerSpacingX();
+        float rowW = Math.max(120.0f, ImGui.getContentRegionAvailX());
+        float x = ImGui.getCursorScreenPosX();
+        float y = ImGui.getCursorScreenPosY();
+        ImDrawList dl = ImGui.getWindowDrawList();
+        String popId = "##pop_" + uid;
+        boolean popupOpen = ImGui.isPopupOpen(popId);
+
         float pickBtnW = 42.0f;
-        float availW = ImGui.calcItemWidth();
-        ImGui.pushItemWidth(Math.max(72.0f, availW - pickBtnW - spacing));
-        boolean edited = false;
-        if (hasAlpha) {
-            edited = ImGui.colorEdit4("##col_" + uid, tmpColor4);
-        } else {
-            tmpColor3[0] = tmpColor4[0];
-            tmpColor3[1] = tmpColor4[1];
-            tmpColor3[2] = tmpColor4[2];
-            if (ImGui.colorEdit3("##col_" + uid, tmpColor3)) {
-                tmpColor4[0] = tmpColor3[0];
-                tmpColor4[1] = tmpColor3[1];
-                tmpColor4[2] = tmpColor3[2];
-                tmpColor4[3] = 1.0f;
-                edited = true;
-            }
-        }
-        ImGui.popItemWidth();
+        float rightReserve = pickBtnW + 8.0f;
+        boolean rowClicked = ImGui.invisibleButton("##prop_" + uid, Math.max(40.0f, rowW - rightReserve), ROW_H);
+        boolean rowHovered = ImGui.isItemHovered();
 
-        ImGui.sameLine(0.0f, spacing);
+        ImGui.setCursorScreenPos(x + rowW - pickBtnW - 4.0f, y + (ROW_H - BOX_H) * 0.5f);
         boolean pickingThis = colorPicker.isTargeting(props, key);
         if (pickingThis) {
-            ImGui.pushStyleColor(imgui.flag.ImGuiCol.Button, 0.16f, 0.56f, 0.72f, 1.0f);
+            ImGui.pushStyleColor(ImGuiCol.Button, 0.16f, 0.56f, 0.72f, 1.0f);
         }
-        if (ImGui.button((pickingThis ? "..." : "Pick") + "##pick_" + uid, pickBtnW, 0.0f)) {
-            colorPicker.beginPick(props, key, kind, tmpColor4[3]);
-        }
+        boolean pickClicked = ImGui.button((pickingThis ? "..." : "Pick") + "##pick_" + uid, pickBtnW, BOX_H);
         if (pickingThis) {
             ImGui.popStyleColor();
         }
         if (ImGui.isItemHovered()) {
-            ImGui.setTooltip("Eyedropper: pick color from any pixel on screen (Esc or Right-click to cancel)");
+            ImGui.setTooltip("Eyedropper: pick color from anywhere on screen");
+        }
+        ImGui.setCursorScreenPos(x, y + ROW_H);
+        ImGui.dummy(0.0f, 0.0f);
+
+        if (pickClicked) {
+            colorPicker.beginPick(props, key, kind, tmpColor4[3]);
         }
 
-        ImGui.sameLine(0.0f, spacing);
-        ImGui.textUnformatted(key);
+        drawRowChrome(dl, x, y, rowW, ROW_H, rowHovered, popupOpen);
+
+        // Right-aligned square color swatch + hex box (to the left of Pick button)
+        float hexBoxW = Math.max(76.0f, ImGui.calcTextSize("#AARRGGBB").x + 14.0f);
+        float swatchW = BOX_H;
+        float hexX = x + rowW - rightReserve - hexBoxW - 4.0f;
+        float boxY = y + (ROW_H - BOX_H) * 0.5f;
+        float swatchX = hexX - BOX_GAP - swatchW;
+
+        // Checkerboard + live RGBA swatch
+        int chkA = ImGui.getColorU32(0.45f, 0.48f, 0.54f, 1.0f);
+        int chkB = ImGui.getColorU32(0.28f, 0.30f, 0.35f, 1.0f);
+        float midX = swatchX + swatchW * 0.5f;
+        float midY = boxY + BOX_H * 0.5f;
+        dl.addRectFilled(swatchX + 1f, boxY + 1f, midX, midY, chkA);
+        dl.addRectFilled(midX, boxY + 1f, swatchX + swatchW - 1f, midY, chkB);
+        dl.addRectFilled(swatchX + 1f, midY, midX, boxY + BOX_H - 1f, chkB);
+        dl.addRectFilled(midX, midY, swatchX + swatchW - 1f, boxY + BOX_H - 1f, chkA);
+        int fillCol = ImGui.getColorU32(tmpColor4[0], tmpColor4[1], tmpColor4[2], hasAlpha ? tmpColor4[3] : 1.0f);
+        dl.addRectFilled(swatchX + 1f, boxY + 1f, swatchX + swatchW - 1f, boxY + BOX_H - 1f, fillCol, 3.0f);
+        int borderCol = (rowHovered || popupOpen)
+                ? ImGui.getColorU32(0.24f, 0.78f, 0.98f, 0.95f)
+                : ImGui.getColorU32(0.32f, 0.37f, 0.46f, 0.95f);
+        dl.addRect(swatchX, boxY, swatchX + swatchW, boxY + BOX_H, borderCol, 4.0f, 0, 1.2f);
+
+        drawPreviewBox(dl, hexX, boxY, hexBoxW, BOX_H, new PreviewBoxSpec(hexLabel, hexBoxW, hexBoxW, -1f, false, false),
+                rowHovered, popupOpen);
+
+        drawRowLabelClipped(dl, x + 8.0f, y, swatchX - 10.0f, ROW_H, key);
+
+        if (rowClicked) {
+            openPropertyPopup(uid);
+            popupHexBuf.set(hexLabel);
+        }
+
+        boolean edited = false;
+        if (beginAnchoredPropertyPopup(uid, 350.0f, 360.0f)) {
+            renderPopupHeader(key, hasAlpha ? "RGBA Color" : "RGB Color");
+            int pickerFlags = ImGuiColorEditFlags.AlphaBar | ImGuiColorEditFlags.NoSidePreview;
+            if (hasAlpha) {
+                if (ImGui.colorPicker4("##cp4_" + uid, tmpColor4, pickerFlags)) {
+                    edited = true;
+                }
+            } else {
+                tmpColor3[0] = tmpColor4[0];
+                tmpColor3[1] = tmpColor4[1];
+                tmpColor3[2] = tmpColor4[2];
+                if (ImGui.colorPicker3("##cp3_" + uid, tmpColor3, ImGuiColorEditFlags.NoSidePreview)) {
+                    tmpColor4[0] = tmpColor3[0];
+                    tmpColor4[1] = tmpColor3[1];
+                    tmpColor4[2] = tmpColor3[2];
+                    tmpColor4[3] = 1.0f;
+                    edited = true;
+                }
+            }
+            if (edited) {
+                popupHexBuf.set(formatColorHex(GraphicsUtils.f4ColorToIntColor(tmpColor4), hasAlpha));
+            }
+            ImGui.alignTextToFramePadding();
+            ImGui.textUnformatted("Hex");
+            ImGui.sameLine(0.0f, 8.0f);
+            ImGui.setNextItemWidth(132.0f);
+            boolean hexEnter = ImGui.inputText("##hex_" + uid, popupHexBuf,
+                    ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll);
+            if (ImGui.isItemActive() && !edited) {
+                Integer parsed = parseColorHex(popupHexBuf.get(), hasAlpha, Math.round(tmpColor4[3] * 255.0f));
+                if (parsed != null && parsed.intValue() != curArgb) {
+                    GraphicsUtils.intColorToF4Color(tmpColor4, parsed.intValue());
+                    edited = true;
+                }
+            } else if (hexEnter || ImGui.isItemDeactivatedAfterEdit()) {
+                Integer parsed = parseColorHex(popupHexBuf.get(), hasAlpha, Math.round(tmpColor4[3] * 255.0f));
+                if (parsed != null) {
+                    GraphicsUtils.intColorToF4Color(tmpColor4, parsed.intValue());
+                    edited = true;
+                }
+                popupHexBuf.set(formatColorHex(GraphicsUtils.f4ColorToIntColor(tmpColor4), hasAlpha));
+            }
+            ImGui.sameLine(0.0f, 8.0f);
+            float hexRowUsed = ImGui.calcTextSize("Hex").x + 8.0f + 132.0f + 8.0f;
+            float pickScreenW = Math.max(88.0f, activePopupContentW - hexRowUsed);
+            if (ImGui.button("Pick Screen##pop_pick_" + uid, pickScreenW, 0.0f)) {
+                colorPicker.beginPick(props, key, kind, tmpColor4[3]);
+                ImGui.closeCurrentPopup();
+            }
+            ImGui.endPopup();
+        }
 
         if (!edited) return false;
         int newArgb = GraphicsUtils.f4ColorToIntColor(tmpColor4);
@@ -653,181 +725,477 @@ public class PropertyInspectorPanel {
         return true;
     }
 
-    private boolean editIntField(String label, String uid, int[] val, int min, int max) {
-        String fieldUid = uid + "#0";
-        currentFrameFieldUids.add(fieldUid);
-        if (fieldUid.equals(inlineEditKey)) {
-            if (inlineEditBufNeedsInit) {
-                inlineEditBuf.set(Integer.toString(val[0]));
-                inlineEditBufNeedsInit = false;
-                inlineEditNeedsFocus = true;
-                inlineEditSawActive = false;
-                inlineEditGraceFrames = 2;
+    private boolean renderAssetPropertyRowAndPopup(CustomPropertiesList props, String key, String[] parts, String uid) {
+        String cur = props.getPropertyString(key, "");
+        if (cur == null) cur = "";
+        boolean isFont = "typeFace".equals(key);
+        boolean isVideoOnly = "customVideo".equals(key);
+        boolean isMask = "MaskImage".equals(key);
+        boolean allowCompositions = !isFont && !isVideoOnly && hasCompositionSentinel(parts);
+        int compCount = activeScene != null ? activeScene.getEntryCount() : 0;
+
+        ThumbEntry thumb = (!isFont && !cur.isEmpty()) ? getOrLoadThumbnail(cur) : null;
+        String displayLabel = isMask ? (key + " (Mask)") : key;
+        String shortRef = formatMediaOptionLabel(cur, isFont);
+        if (shortRef.isEmpty()) shortRef = "(none)";
+        if (shortRef.startsWith("local:")) shortRef = shortRef.substring("local:".length());
+        if (shortRef.startsWith("internalres:")) shortRef = shortRef.substring("internalres:".length());
+
+        float rowW = Math.max(120.0f, ImGui.getContentRegionAvailX());
+        float x = ImGui.getCursorScreenPosX();
+        float y = ImGui.getCursorScreenPosY();
+        ImDrawList dl = ImGui.getWindowDrawList();
+        String popId = "##pop_" + uid;
+        boolean popupOpen = ImGui.isPopupOpen(popId);
+
+        boolean rowClicked = ImGui.invisibleButton("##prop_" + uid, rowW, ASSET_ROW_H);
+        boolean rowHovered = ImGui.isItemHovered();
+
+        drawRowChrome(dl, x, y, rowW, ASSET_ROW_H, rowHovered, popupOpen);
+
+        float thumbSize = 34.0f;
+        float thumbY = y + (ASSET_ROW_H - thumbSize) * 0.5f;
+        float textBoxW = Math.max(76.0f, Math.min(148.0f, ImGui.calcTextSize(shortRef).x + 18.0f));
+        float textBoxX = x + rowW - 8.0f - textBoxW;
+        float textBoxY = y + (ASSET_ROW_H - BOX_H) * 0.5f;
+        float thumbX = textBoxX - BOX_GAP - thumbSize;
+
+        // Square asset thumbnail box
+        int bgCol = ImGui.getColorU32(0.11f, 0.14f, 0.19f, 1.0f);
+        int brCol = (rowHovered || popupOpen)
+                ? ImGui.getColorU32(0.24f, 0.78f, 0.98f, 0.95f)
+                : ImGui.getColorU32(0.32f, 0.37f, 0.46f, 0.95f);
+        dl.addRectFilled(thumbX, thumbY, thumbX + thumbSize, thumbY + thumbSize, bgCol, 4.0f);
+        if (thumb != null && thumb.texId != 0) {
+            dl.addImage(thumb.texId, thumbX + 2f, thumbY + 2f, thumbX + thumbSize - 2f, thumbY + thumbSize - 2f, 0f, 0f, 1f, 1f);
+        } else {
+            String badge = isFont ? "Aa" : (cur.startsWith("composition:") ? "Cmp" : (cur.isEmpty() ? "--" : "Img"));
+            float bw = ImGui.calcTextSize(badge).x;
+            dl.addText(thumbX + (thumbSize - bw) * 0.5f, thumbY + (thumbSize - ImGui.getFontSize()) * 0.5f,
+                    ImGui.getColorU32(0.70f, 0.76f, 0.85f, 1.0f), badge);
+        }
+        dl.addRect(thumbX, thumbY, thumbX + thumbSize, thumbY + thumbSize, brCol, 4.0f, 0, 1.2f);
+
+        drawPreviewBox(dl, textBoxX, textBoxY, textBoxW, BOX_H,
+                new PreviewBoxSpec(shortRef, textBoxW, textBoxW, -1f, cur.isEmpty(), false), rowHovered, popupOpen);
+
+        drawRowLabelClipped(dl, x + 8.0f, y, thumbX - 10.0f, ASSET_ROW_H, displayLabel);
+
+        if (rowClicked) {
+            openPropertyPopup(uid);
+            popupBuffers.put(uid + "#path", new ImString(cur, 512));
+        }
+
+        boolean isModified = false;
+        if (beginAnchoredPropertyPopup(uid, 430.0f, 250.0f)) {
+            renderPopupHeader(displayLabel, isFont ? "Font / Typeface" : "Asset / Media");
+            ImString pathBuf = getPopupBuffer(uid + "#path", cur, 512);
+
+            ImGui.setNextItemWidth(activePopupContentW);
+            if (ImGui.inputText("##path_" + uid, pathBuf)) {
+                props.putPropertyStringValue(key, pathBuf.get());
+                isModified = true;
             }
-            String committed = renderInlineTextEditor(label + "##edit_" + fieldUid, fieldUid);
-            if (committed != null) {
-                Integer parsed = parseEditedInt(committed);
-                if (parsed != null && parsed.intValue() != val[0]) {
-                    val[0] = parsed.intValue();
-                    return true;
+
+            List<String> optList = buildMediaOptions(parts, isFont, isVideoOnly, compCount);
+            if (!optList.isEmpty()) {
+                String[] displayOpts = new String[optList.size() + 1];
+                displayOpts[0] = isFont ? "(select font / media...)" : "(select integrated / workspace media...)";
+                String normalizedCur = cur;
+                if (isFont && normalizedCur.startsWith("internal_") && normalizedCur.indexOf(':') > 0) {
+                    normalizedCur = normalizedCur.substring(0, normalizedCur.indexOf(':'));
+                }
+                int selIdx = 0;
+                for (int i = 0; i < optList.size(); i++) {
+                    String val = optList.get(i);
+                    displayOpts[i + 1] = formatMediaOptionLabel(val, isFont);
+                    if (val.equals(cur) || val.equals(normalizedCur)) {
+                        selIdx = i + 1;
+                    }
+                }
+                tmpCombo.set(selIdx);
+                ImGui.setNextItemWidth(activePopupContentW);
+                if (ImGui.combo("##preset_" + uid, tmpCombo, displayOpts) && tmpCombo.get() > 0) {
+                    String pickedVal = optList.get(tmpCombo.get() - 1);
+                    props.putPropertyStringValue(key, pickedVal);
+                    pathBuf.set(pickedVal);
+                    isModified = true;
                 }
             }
-            return false;
+            if (allowCompositions && compCount <= 1) {
+                ImGui.textDisabled("Tip: Click '+ Comp' in Scene Hierarchy to create a Composition.");
+            }
+
+            String browseLabel = isFont ? "Browse Font...##br_" + uid
+                    : (isVideoOnly ? "Browse Video...##br_" + uid
+                    : (isMask ? "Browse Alpha Mask...##br_" + uid : "Browse Image / Video...##br_" + uid));
+            if (ImGui.button(browseLabel)) {
+                File picked = openAssetFileDialog(isFont, isVideoOnly);
+                if (picked != null) {
+                    try {
+                        String localRef = VizArchiveManager.importLocalAsset(picked);
+                        props.putPropertyStringValue(key, localRef);
+                        pathBuf.set(localRef);
+                        thumbCache.remove(localRef);
+                        isModified = true;
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+            ImGui.sameLine();
+            if (ImGui.button("Clear##clr_" + uid)) {
+                props.putPropertyStringValue(key, "");
+                pathBuf.set("");
+                isModified = true;
+            }
+            ImGui.sameLine();
+            if (ImGui.button("Done##done_" + uid)) {
+                ImGui.closeCurrentPopup();
+            }
+
+            String livePath = props.getPropertyString(key, "");
+            if (!isFont && livePath != null && !livePath.isEmpty()) {
+                ThumbEntry popThumb = getOrLoadThumbnail(livePath);
+                if (popThumb != null) {
+                    ImGui.textDisabled(popThumb.label);
+                    if (popThumb.texId != 0) {
+                        float scale = Math.min(200f / Math.max(1, popThumb.w), 110f / Math.max(1, popThumb.h));
+                        float tw = Math.max(20f, popThumb.w * scale);
+                        float th = Math.max(20f, popThumb.h * scale);
+                        ImGui.image(popThumb.texId, tw, th, 0f, 0f, 1f, 1f);
+                    }
+                }
+            }
+            ImGui.endPopup();
+        }
+        return isModified;
+    }
+
+    private boolean renderPropertyRowWithBoxes(String uid, String label, List<PreviewBoxSpec> boxes, boolean popupOpen) {
+        float rowW = Math.max(120.0f, ImGui.getContentRegionAvailX());
+        float x = ImGui.getCursorScreenPosX();
+        float y = ImGui.getCursorScreenPosY();
+        ImDrawList dl = ImGui.getWindowDrawList();
+
+        boolean clicked = ImGui.invisibleButton("##prop_" + uid, rowW, ROW_H);
+        boolean hovered = ImGui.isItemHovered();
+
+        drawRowChrome(dl, x, y, rowW, ROW_H, hovered, popupOpen);
+
+        // Layout preview boxes right-to-left
+        float availForBoxes = Math.max(60.0f, rowW * 0.56f);
+        int count = boxes != null ? boxes.size() : 0;
+        float[] boxWidths = new float[count];
+        float totalBoxW = 0.0f;
+        for (int i = 0; i < count; i++) {
+            PreviewBoxSpec b = boxes.get(i);
+            float tw = ImGui.calcTextSize(b.text).x + 16.0f;
+            float w = Math.max(b.minWidth, Math.min(b.maxWidth, tw));
+            boxWidths[i] = w;
+            totalBoxW += w + (i > 0 ? BOX_GAP : 0.0f);
+        }
+        if (totalBoxW > availForBoxes && count > 0) {
+            float scale = availForBoxes / totalBoxW;
+            totalBoxW = 0.0f;
+            for (int i = 0; i < count; i++) {
+                boxWidths[i] = Math.max(28.0f, boxWidths[i] * scale);
+                totalBoxW += boxWidths[i] + (i > 0 ? BOX_GAP : 0.0f);
+            }
         }
 
+        float curX = x + rowW - 8.0f - totalBoxW;
+        float boxesLeftX = curX;
+        float boxY = y + (ROW_H - BOX_H) * 0.5f;
+        for (int i = 0; i < count; i++) {
+            drawPreviewBox(dl, curX, boxY, boxWidths[i], BOX_H, boxes.get(i), hovered, popupOpen);
+            curX += boxWidths[i] + BOX_GAP;
+        }
+
+        drawRowLabelClipped(dl, x + 8.0f, y, (count > 0 ? boxesLeftX : (x + rowW - 8.0f)) - 10.0f, ROW_H, label);
+        return clicked;
+    }
+
+    private static void drawRowChrome(ImDrawList dl, float x, float y, float w, float h,
+                                      boolean hovered, boolean popupOpen) {
+        if (popupOpen) {
+            dl.addRectFilled(x - 2f, y + 1f, x + w + 2f, y + h - 2f,
+                    ImGui.getColorU32(0.15f, 0.24f, 0.34f, 0.72f), 4.0f);
+            dl.addRectFilled(x - 2f, y + 3f, x + 1f, y + h - 4f,
+                    ImGui.getColorU32(0.24f, 0.78f, 0.98f, 1.0f), 1.5f);
+        } else if (hovered) {
+            dl.addRectFilled(x - 2f, y + 1f, x + w + 2f, y + h - 2f,
+                    ImGui.getColorU32(0.20f, 0.25f, 0.33f, 0.52f), 4.0f);
+        }
+        dl.addLine(x + 2f, y + h - 1f, x + w - 2f, y + h - 1f,
+                ImGui.getColorU32(0.22f, 0.26f, 0.34f, 0.45f), 1.0f);
+    }
+
+    private static void drawRowLabelClipped(ImDrawList dl, float textX, float rowY, float maxX, float rowH, String label) {
+        float limitX = Math.max(textX + 24.0f, maxX);
+        dl.pushClipRect(textX, rowY, limitX, rowY + rowH, true);
+        dl.addText(textX, rowY + (rowH - ImGui.getFontSize()) * 0.5f,
+                ImGui.getColorU32(0.91f, 0.94f, 0.98f, 1.0f), label);
+        dl.popClipRect();
+    }
+
+    private static void drawPreviewBox(ImDrawList dl, float bx, float by, float bw, float bh,
+                                       PreviewBoxSpec spec, boolean hovered, boolean popupOpen) {
+        int bgCol;
+        if (spec.accent) {
+            bgCol = ImGui.getColorU32(0.11f, 0.28f, 0.39f, 0.95f);
+        } else if (spec.muted) {
+            bgCol = ImGui.getColorU32(0.10f, 0.12f, 0.16f, 0.85f);
+        } else {
+            bgCol = ImGui.getColorU32(0.12f, 0.15f, 0.20f, 0.96f);
+        }
+        int borderCol;
+        if (popupOpen || hovered) {
+            borderCol = ImGui.getColorU32(0.24f, 0.78f, 0.98f, 0.92f);
+        } else if (spec.accent) {
+            borderCol = ImGui.getColorU32(0.20f, 0.62f, 0.84f, 0.90f);
+        } else {
+            borderCol = ImGui.getColorU32(0.28f, 0.33f, 0.42f, 0.88f);
+        }
+
+        dl.addRectFilled(bx, by, bx + bw, by + bh, bgCol, 4.0f);
+        dl.addRect(bx, by, bx + bw, by + bh, borderCol, 4.0f, 0, 1.0f);
+
+        if (spec.fillRatio >= 0.0f) {
+            float barX0 = bx + 3.0f;
+            float barX1 = bx + bw - 3.0f;
+            float barY1 = by + bh - 2.0f;
+            float barY0 = barY1 - 2.5f;
+            dl.addRectFilled(barX0, barY0, barX1, barY1, ImGui.getColorU32(0.22f, 0.26f, 0.34f, 0.85f), 1.0f);
+            float fillEnd = barX0 + (barX1 - barX0) * Math.max(0.0f, Math.min(1.0f, spec.fillRatio));
+            if (fillEnd > barX0 + 0.5f) {
+                dl.addRectFilled(barX0, barY0, fillEnd, barY1, ImGui.getColorU32(0.24f, 0.78f, 0.98f, 0.95f), 1.0f);
+            }
+        }
+
+        int txtCol = spec.muted
+                ? ImGui.getColorU32(0.56f, 0.61f, 0.69f, 1.0f)
+                : (spec.accent ? ImGui.getColorU32(0.45f, 0.88f, 1.0f, 1.0f)
+                : ImGui.getColorU32(0.93f, 0.96f, 1.0f, 1.0f));
+        float tw = ImGui.calcTextSize(spec.text).x;
+        float tx = bx + Math.max(5.0f, (bw - tw) * 0.5f);
+        float ty = by + (bh - (spec.fillRatio >= 0f ? 3f : 0f) - ImGui.getFontSize()) * 0.5f;
+        dl.pushClipRect(bx + 3.0f, by + 1.0f, bx + bw - 3.0f, by + bh - 2.0f, true);
+        dl.addText(tx, ty, txtCol, spec.text);
+        dl.popClipRect();
+    }
+
+    private ImString getPopupBuffer(String slotId, String initial, int capacity) {
+        ImString buf = popupBuffers.get(slotId);
+        if (buf == null) {
+            buf = new ImString(initial != null ? initial : "", capacity);
+            popupBuffers.put(slotId, buf);
+        }
+        return buf;
+    }
+
+    private void openPropertyPopup(String uid) {
+        if (!uid.equals(activePopupUid)) {
+            popupBuffers.clear();
+            activePopupUid = uid;
+        }
+        popupAnchorX = ImGui.getItemRectMinX();
+        popupAnchorY = ImGui.getItemRectMaxY() + 3.0f;
+        ImGui.openPopup("##pop_" + uid);
+    }
+
+    private boolean beginAnchoredPropertyPopup(String uid, float preferredW, float estHeight) {
+        ImGuiViewport vp = ImGui.getMainViewport();
+        float vpMinX = vp.getWorkPosX() + 6.0f;
+        float vpMinY = vp.getWorkPosY() + 6.0f;
+        float vpMaxX = vp.getWorkPosX() + vp.getWorkSizeX() - 6.0f;
+        float vpMaxY = vp.getWorkPosY() + vp.getWorkSizeY() - 6.0f;
+        float px = Math.max(vpMinX, Math.min(popupAnchorX, vpMaxX - preferredW));
+        float py = popupAnchorY;
+        if (py + estHeight > vpMaxY) {
+            py = Math.max(vpMinY, Math.min(popupAnchorY - ROW_H - estHeight - 6.0f, vpMaxY - estHeight));
+        }
+        py = Math.max(vpMinY, py);
+        ImGui.setNextWindowPos(px, py, ImGuiCond.Appearing);
+        ImGui.setNextWindowSize(preferredW, 0.0f, ImGuiCond.Appearing);
+        ImGui.setNextWindowSizeConstraints(preferredW, 0.0f, preferredW, 640.0f);
+        boolean open = ImGui.beginPopup("##pop_" + uid);
+        if (open) {
+            activePopupContentW = Math.max(160.0f, preferredW - ImGui.getStyle().getWindowPaddingX() * 2.0f);
+        }
+        return open;
+    }
+
+    private void renderPopupHeader(String title, String hint) {
+        ImGui.textUnformatted(title);
+        if (hint != null && !hint.isEmpty()) {
+            ImGui.sameLine(0.0f, 8.0f);
+            ImGui.textDisabled("(" + hint + ")");
+        }
+        float closeW = 24.0f;
+        float closeX = Math.max(40.0f, ImGui.getStyle().getWindowPaddingX() + activePopupContentW - closeW);
+        ImGui.sameLine(closeX);
+        if (ImGui.smallButton("X##popClose")) {
+            ImGui.closeCurrentPopup();
+        }
+        ImGui.separator();
+    }
+
+    private boolean renderPopupIntSliderAndInput(String slotId, String axisLabel, int[] val, int min, int max) {
         int step = computeNiceIntStep(min, max);
-        int flags = ImGuiSliderFlags.NoInput;
-        boolean ch = ImGui.sliderInt(label + "##" + fieldUid, val, min, max, "%d", flags);
-        if (ch) {
-            val[0] = quantizeInt(val[0], min, max, step);
+        ImString buf = popupBuffers.get(slotId);
+        if (buf == null) {
+            buf = new ImString(Integer.toString(val[0]), 64);
+            popupBuffers.put(slotId, buf);
         }
-        handleInlineTrigger(fieldUid, Integer.toString(val[0]));
-        return ch;
-    }
 
-    private boolean editFloatField(String label, String uid, float[] val, float min, float max) {
-        return editSingleFloatSlot(label, uid + "#0", val, 0, min, max, computeNiceFloatStep(min, max));
-    }
+        float axisW = 0.0f;
+        if (axisLabel != null && !axisLabel.isEmpty()) {
+            ImGui.alignTextToFramePadding();
+            ImGui.textUnformatted(axisLabel);
+            axisW = ImGui.calcTextSize(axisLabel).x + 8.0f;
+            ImGui.sameLine(0.0f, 8.0f);
+        }
 
-    private boolean editFloat2Field(String label, String uid, float[] val, float speed, float min, float max) {
-        float totalW = ImGui.calcItemWidth();
-        float spacing = ImGui.getStyle().getItemInnerSpacingX();
-        float leftW = Math.max(44.0f, (totalW - spacing) * 0.5f);
-        float rightW = Math.max(44.0f, totalW - leftW - spacing);
-        float step = computeNiceFloatStep(min, max);
+        float inputW = 92.0f;
+        float sliderW = Math.max(120.0f, activePopupContentW - axisW - inputW - 8.0f);
         boolean changed = false;
 
-        ImGui.pushItemWidth(leftW);
-        if (editSingleFloatSlot("##" + uid + "_0", uid + "#0", val, 0, min, max, step)) {
+        ImGui.setNextItemWidth(sliderW);
+        boolean slChanged = ImGui.sliderInt("##sl_" + slotId, val, min, max, "%d", ImGuiSliderFlags.NoInput);
+        if (slChanged) {
+            val[0] = quantizeInt(val[0], min, max, step);
+            buf.set(Integer.toString(val[0]));
             changed = true;
         }
-        ImGui.popItemWidth();
 
-        ImGui.sameLine(0.0f, spacing);
-
-        ImGui.pushItemWidth(rightW);
-        if (editSingleFloatSlot("##" + uid + "_1", uid + "#1", val, 1, min, max, step)) {
-            changed = true;
+        ImGui.sameLine(0.0f, 8.0f);
+        ImGui.setNextItemWidth(inputW);
+        int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
+        boolean entered = ImGui.inputText("##txt_" + slotId, buf, flags);
+        if (ImGui.isItemActive() && !slChanged) {
+            Integer parsed = parseEditedInt(buf.get());
+            if (parsed != null && parsed.intValue() != val[0]) {
+                val[0] = parsed.intValue();
+                changed = true;
+            }
+        } else if (entered || ImGui.isItemDeactivatedAfterEdit()) {
+            Integer parsed = parseEditedInt(buf.get());
+            if (parsed != null) {
+                if (parsed.intValue() != val[0]) {
+                    val[0] = parsed.intValue();
+                    changed = true;
+                }
+                buf.set(Integer.toString(val[0]));
+            } else {
+                buf.set(Integer.toString(val[0]));
+            }
         }
-        ImGui.popItemWidth();
-
-        ImGui.sameLine(0.0f, spacing);
-        ImGui.textUnformatted(label);
         return changed;
     }
 
-    private boolean editSingleFloatSlot(String widgetLabel, String fieldUid, float[] val, int idx, float min, float max, float step) {
-        currentFrameFieldUids.add(fieldUid);
-        if (fieldUid.equals(inlineEditKey)) {
-            if (inlineEditBufNeedsInit) {
-                inlineEditBuf.set(formatFloatForEdit(val[idx], step));
-                inlineEditBufNeedsInit = false;
-                inlineEditNeedsFocus = true;
-                inlineEditSawActive = false;
-                inlineEditGraceFrames = 2;
-            }
-            String editLabel = widgetLabel.startsWith("##") ? ("##edit_" + fieldUid) : (widgetLabel + "##edit_" + fieldUid);
-            String committed = renderInlineTextEditor(editLabel, fieldUid);
-            if (committed != null) {
-                Float parsed = parseEditedFloat(committed);
-                if (parsed != null && Float.compare(parsed.floatValue(), val[idx]) != 0) {
-                    val[idx] = parsed.floatValue();
-                    return true;
-                }
-            }
-            return false;
+    private boolean renderPopupFloatSliderAndInput(String slotId, String axisLabel, float[] val, int idx,
+                                                   float min, float max, float step) {
+        ImString buf = popupBuffers.get(slotId);
+        if (buf == null) {
+            buf = new ImString(formatFloatForEdit(val[idx], step), 64);
+            popupBuffers.put(slotId, buf);
         }
+
+        float axisW = 0.0f;
+        if (axisLabel != null && !axisLabel.isEmpty()) {
+            ImGui.alignTextToFramePadding();
+            ImGui.textUnformatted(axisLabel);
+            axisW = ImGui.calcTextSize(axisLabel).x + 8.0f;
+            ImGui.sameLine(0.0f, 8.0f);
+        }
+
+        float inputW = 92.0f;
+        float sliderW = Math.max(120.0f, activePopupContentW - axisW - inputW - 8.0f);
+        boolean changed = false;
 
         tmpFloat[0] = val[idx];
         String fmt = step < 0.005f ? "%.4f" : "%.3f";
-        String imguiLabel = widgetLabel.contains("##") ? widgetLabel : (widgetLabel + "##" + fieldUid);
-        boolean ch = ImGui.sliderFloat(imguiLabel, tmpFloat, min, max, fmt, ImGuiSliderFlags.NoInput);
-        if (ch) {
+        ImGui.setNextItemWidth(sliderW);
+        boolean slChanged = ImGui.sliderFloat("##sl_" + slotId, tmpFloat, min, max, fmt, ImGuiSliderFlags.NoInput);
+        if (slChanged) {
             float snapped = quantizeFloat(tmpFloat[0], min, max, step);
             if (Math.abs(snapped - val[idx]) > 1e-6f) {
                 val[idx] = snapped;
+                changed = true;
+            }
+            buf.set(formatFloatForEdit(val[idx], step));
+        }
+
+        ImGui.sameLine(0.0f, 8.0f);
+        ImGui.setNextItemWidth(inputW);
+        int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
+        boolean entered = ImGui.inputText("##txt_" + slotId, buf, flags);
+        if (ImGui.isItemActive() && !slChanged) {
+            Float parsed = parseEditedFloat(buf.get());
+            if (parsed != null && Float.compare(parsed.floatValue(), val[idx]) != 0) {
+                val[idx] = parsed.floatValue();
+                changed = true;
+            }
+        } else if (entered || ImGui.isItemDeactivatedAfterEdit()) {
+            Float parsed = parseEditedFloat(buf.get());
+            if (parsed != null) {
+                if (Float.compare(parsed.floatValue(), val[idx]) != 0) {
+                    val[idx] = parsed.floatValue();
+                    changed = true;
+                }
+                buf.set(formatFloatForEdit(val[idx], step));
             } else {
-                ch = false;
+                buf.set(formatFloatForEdit(val[idx], step));
             }
         }
-        handleInlineTrigger(fieldUid, formatFloatForEdit(val[idx], step));
-        return ch;
+        return changed;
     }
 
-    /**
-     * Renders an inline InputText for numeric property entry without double-focusing or
-     * prematurely closing on the mouse-up tail of a double-click. Returns committed string, or null.
-     */
-    private String renderInlineTextEditor(String editLabel, String fieldUid) {
-        if (inlineEditNeedsFocus) {
-            ImGui.setKeyboardFocusHere();
-            inlineEditNeedsFocus = false;
+    static float computePreviewBarFillRatio(float val, float min, float max) {
+        float span = max - min;
+        if (Math.abs(span) < 1e-9f) return 0.0f;
+        float ratio = (val - min) / span;
+        return Math.max(0.0f, Math.min(1.0f, ratio));
+    }
+
+    static String formatPreviewFloat(float val, float step) {
+        if (Math.abs(val) < 1e-5f) val = 0.0f;
+        if (step >= 5.0f && Math.abs(val - Math.round(val)) < 0.01f) {
+            return Integer.toString(Math.round(val));
         }
-        if (inlineEditGraceFrames > 0) {
-            inlineEditGraceFrames--;
+        if (step < 0.005f) return String.format(Locale.US, "%.4f", Float.valueOf(val));
+        if (step < 0.05f) return String.format(Locale.US, "%.3f", Float.valueOf(val));
+        if (step < 1.0f) return String.format(Locale.US, "%.2f", Float.valueOf(val));
+        return String.format(Locale.US, "%.1f", Float.valueOf(val));
+    }
+
+    static String formatColorHex(int argb, boolean hasAlpha) {
+        if (hasAlpha) {
+            return String.format(Locale.US, "#%08X", Integer.valueOf(argb));
         }
-        int flags = ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll;
-        boolean entered = ImGui.inputText(editLabel, inlineEditBuf, flags);
-        if (ImGui.isItemActive() && !ImGui.isMouseDown(0)) {
-            inlineEditSawActive = true;
-        }
-        boolean esc = ImGui.isKeyPressed(ImGuiKey.Escape, false);
-        if (esc) {
-            inlineEditKey = null;
-            inlineEditBufNeedsInit = false;
-            inlineEditNeedsFocus = false;
-            inlineEditSawActive = false;
-            inlineEditGraceFrames = 0;
-            return null;
-        }
-        boolean tab = inlineEditGraceFrames == 0
-                && (ImGui.isItemActive() || ImGui.isItemFocused() || ImGui.isItemDeactivated())
-                && ImGui.isKeyPressed(ImGuiKey.Tab, false);
-        boolean deactivated = inlineEditGraceFrames == 0 && inlineEditSawActive
-                && !ImGui.isMouseDown(0)
-                && (ImGui.isItemDeactivated() || ImGui.isItemDeactivatedAfterEdit() || !ImGui.isItemActive());
-        if (entered || tab || deactivated) {
-            String result = inlineEditBuf.get();
-            advanceOrClearInlineEdit(tab, fieldUid);
-            return result;
+        return String.format(Locale.US, "#%06X", Integer.valueOf(argb & 0x00FFFFFF));
+    }
+
+    static Integer parseColorHex(String text, boolean hasAlpha, int fallbackAlpha) {
+        if (text == null) return null;
+        String s = text.trim();
+        if (s.startsWith("#")) s = s.substring(1);
+        if (s.isEmpty()) return null;
+        try {
+            if (s.length() == 6) {
+                int rgb = (int) Long.parseLong(s, 16) & 0x00FFFFFF;
+                int alpha = hasAlpha ? (Math.max(0, Math.min(255, fallbackAlpha)) << 24) : 0xFF000000;
+                return Integer.valueOf(alpha | rgb);
+            }
+            if (s.length() == 8) {
+                int argb = (int) Long.parseLong(s, 16);
+                if (!hasAlpha) argb |= 0xFF000000;
+                return Integer.valueOf(argb);
+            }
+        } catch (NumberFormatException ignored) {
         }
         return null;
-    }
-
-    private void handleInlineTrigger(String fieldUid, String initialText) {
-        if (ImGui.isItemHovered()) {
-            if (!ImGui.isItemActive()) {
-                ImGui.setTooltip("Double-click or Ctrl+Click to type (Tab saves & advances)");
-            }
-            if (ImGui.isMouseDoubleClicked(0) || (ImGui.isMouseClicked(0) && ImGui.getIO().getKeyCtrl())) {
-                inlineEditKey = fieldUid;
-                inlineEditBufNeedsInit = false;
-                inlineEditBuf.set(initialText);
-                inlineEditNeedsFocus = true;
-                inlineEditSawActive = false;
-                inlineEditGraceFrames = 3;
-            }
-        }
-    }
-
-    private void advanceOrClearInlineEdit(boolean tabPressed, String currentUid) {
-        if (tabPressed) {
-            boolean reverse = ImGui.getIO().getKeyShift();
-            String nextUid = findNextFieldUid(lastFrameFieldUids, currentUid, reverse);
-            if (nextUid != null) {
-                inlineEditKey = nextUid;
-                inlineEditBufNeedsInit = true;
-                inlineEditNeedsFocus = true;
-                inlineEditSawActive = false;
-                inlineEditGraceFrames = 2;
-                return;
-            }
-        }
-        inlineEditKey = null;
-        inlineEditBufNeedsInit = false;
-        inlineEditNeedsFocus = false;
-        inlineEditSawActive = false;
-        inlineEditGraceFrames = 0;
     }
 
     static String findNextFieldUid(List<String> order, String currentUid, boolean reverse) {

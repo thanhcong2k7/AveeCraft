@@ -940,6 +940,9 @@ public class EditorVerifier {
         // Part 10 verification: Media library store, volume default/clamping, preview zoom/pan & inline numeric edit helpers
         verifyPart10UiThemeZoomVolumeAndMediaManager();
 
+        // Part 11 verification: Constant-RAM streaming audio, async track load, unload cleanup & preview/export layout
+        verifyPart11StreamingAudioAndLayout();
+
         System.out.println("ALL VERIFICATIONS PASSED (presets=" + testedPresets + ", video+audio+image+highlight+export+viz round-trip=OK)");
         audio.shutdown();
         GL30.glDeleteFramebuffers(fbo);
@@ -2084,7 +2087,7 @@ public class EditorVerifier {
                     + " noSnap=" + java.util.Arrays.toString(noSnap));
         }
 
-        // 4) Inline numeric edit parsing & step quantization (double-click edit target helpers)
+        // 4) Numeric parsing, step quantization, preview box fill ratio & hex color round-trip
         Float parsedF = PropertyInspectorPanel.parseEditedFloat("0.375");
         Integer parsedI = PropertyInspectorPanel.parseEditedInt("42");
         if (parsedF == null || Math.abs(parsedF - 0.375f) > 1e-5f || parsedI == null || parsedI != 42) {
@@ -2094,8 +2097,106 @@ public class EditorVerifier {
         if (Math.abs(quantized - 0.10f) > 1e-5f) {
             throw new AssertionError("Expected quantized float 0.10, got " + quantized);
         }
+        if (Math.abs(PropertyInspectorPanel.computePreviewBarFillRatio(50f, 0f, 100f) - 0.5f) > 1e-5f
+                || Math.abs(PropertyInspectorPanel.computePreviewBarFillRatio(-20f, 0f, 100f)) > 1e-5f
+                || Math.abs(PropertyInspectorPanel.computePreviewBarFillRatio(150f, 0f, 100f) - 1.0f) > 1e-5f
+                || Math.abs(PropertyInspectorPanel.computePreviewBarFillRatio(5f, 5f, 5f)) > 1e-5f) {
+            throw new AssertionError("Preview box fill ratio computation mismatch");
+        }
+        if (!"#80FF4020".equals(PropertyInspectorPanel.formatColorHex(0x80FF4020, true))
+                || !"#FF4020".equals(PropertyInspectorPanel.formatColorHex(0xFFFF4020, false))) {
+            throw new AssertionError("Color hex formatting mismatch");
+        }
+        Integer rgbParsed = PropertyInspectorPanel.parseColorHex("#FF4020", false, 0xFF);
+        Integer argbParsed = PropertyInspectorPanel.parseColorHex("#80FF4020", true, 0xFF);
+        if (rgbParsed == null || rgbParsed.intValue() != 0xFFFF4020
+                || argbParsed == null || argbParsed.intValue() != 0x80FF4020
+                || PropertyInspectorPanel.parseColorHex("not_hex", true, 0xFF) != null) {
+            throw new AssertionError("Color hex parsing mismatch: rgb=" + rgbParsed + " argb=" + argbParsed);
+        }
+        if (!"0.50".equals(PropertyInspectorPanel.formatPreviewFloat(0.5f, 0.05f))
+                || !"120".equals(PropertyInspectorPanel.formatPreviewFloat(120.0f, 5.0f))
+                || !"0.125".equals(PropertyInspectorPanel.formatPreviewFloat(0.125f, 0.01f))) {
+            throw new AssertionError("Preview float formatting mismatch");
+        }
 
         System.out.println("Part 10 verification OK (silent audio default + volume clamp, media library "
-                + "AveeMediaScanner & persistent folder removal, zoom/pan rects & inline edit helpers OK)");
+                + "AveeMediaScanner & persistent folder removal, zoom/pan, box preview & popup helpers OK)");
+    }
+
+    private static void verifyPart11StreamingAudioAndLayout() throws Exception {
+        // 1) Constant-RAM streaming audio engine + mid-track seek + track unload cleanup + async load
+        File tmpMp3 = File.createTempFile("avee_part11_stream_", ".mp3");
+        tmpMp3.deleteOnExit();
+        try (var is = EditorVerifier.class.getResourceAsStream("/samples/music.mp3")) {
+            if (is == null) {
+                throw new AssertionError("Missing /samples/music.mp3 resource for streaming verification");
+            }
+            java.nio.file.Files.copy(is, tmpMp3.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        DesktopAudioEngine streamAudio = new DesktopAudioEngine(false);
+        try {
+            if (!streamAudio.loadAudioFile(tmpMp3)) {
+                throw new AssertionError("Streaming DesktopAudioEngine failed to load /samples/music.mp3");
+            }
+            long bufBytes = streamAudio.getEstimatedAudioBufferBytes();
+            if (bufBytes <= 0 || bufBytes > 1024L * 1024L) {
+                throw new AssertionError("Expected <= 1MB constant ring buffer, got " + bufBytes);
+            }
+            if (streamAudio.getDurationMs() <= 180_000L) {
+                throw new AssertionError("Expected > 180s duration for music.mp3, got " + streamAudio.getDurationMs());
+            }
+            streamAudio.setSyntheticBeat(false);
+            streamAudio.stepOfflineFrame(60_000L, 0.016f);
+            com.daaw.avee.comp.playback.AudioFrameData frameAt60s = streamAudio.onRequestSoundVisualizationData(1024, 0);
+            if (!frameAt60s.valid || frameAt60s.rms <= 0.001f) {
+                throw new AssertionError("Expected non-zero streamed RMS at 60s, got rms=" + frameAt60s.rms);
+            }
+            String artPath = streamAudio.getEmbeddedArtPath();
+            streamAudio.unloadCurrentTrack();
+            if (streamAudio.hasAudioLoaded() || streamAudio.getAudioFile() != null) {
+                throw new AssertionError("unloadCurrentTrack failed to clear audio state");
+            }
+            if (artPath != null && new File(artPath).exists()) {
+                throw new AssertionError("unloadCurrentTrack failed to delete temp album art: " + artPath);
+            }
+
+            java.util.concurrent.CompletableFuture<String> asyncThread = new java.util.concurrent.CompletableFuture<>();
+            streamAudio.loadAudioFileAsync(tmpMp3, ok -> {
+                if (Boolean.TRUE.equals(ok)) {
+                    asyncThread.complete(Thread.currentThread().getName());
+                } else {
+                    asyncThread.completeExceptionally(new AssertionError("Async audio load returned false"));
+                }
+            });
+            String loaderName = asyncThread.get(8, java.util.concurrent.TimeUnit.SECONDS);
+            if (!loaderName.startsWith("AveeAudioLoader")) {
+                throw new AssertionError("Expected AveeAudioLoader thread, got " + loaderName);
+            }
+        } finally {
+            streamAudio.shutdown();
+        }
+
+        // 2) Preview unload policy during Export / non-Visualizer pages
+        if (!AveeEditorApp.shouldRenderLivePreview(true, false, false)
+                || AveeEditorApp.shouldRenderLivePreview(false, false, false)
+                || AveeEditorApp.shouldRenderLivePreview(true, true, false)
+                || !AveeEditorApp.shouldRenderLivePreview(false, true, true)) {
+            throw new AssertionError("shouldRenderLivePreview policy mismatch");
+        }
+
+        // 3) Auto-resizing bottom preview control bar layout
+        AveeEditorApp.PreviewBottomLayout wide = AveeEditorApp.computePreviewBottomBarLayout(600f);
+        AveeEditorApp.PreviewBottomLayout medium = AveeEditorApp.computePreviewBottomBarLayout(300f);
+        AveeEditorApp.PreviewBottomLayout narrow = AveeEditorApp.computePreviewBottomBarLayout(220f);
+        if (wide.twoRows || wide.compactResLabels
+                || medium.twoRows || !medium.compactResLabels
+                || !narrow.twoRows || narrow.totalBarHeight <= 45f) {
+            throw new AssertionError("Preview bottom bar responsive layout mismatch");
+        }
+
+        System.out.println("Part 11 verification OK (constant 512KB ring PCM stream, async loader, "
+                + "track unload cleanup, preview unload policy & responsive preview bar OK)");
     }
 }

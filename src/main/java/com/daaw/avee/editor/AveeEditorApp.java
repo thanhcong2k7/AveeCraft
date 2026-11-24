@@ -71,6 +71,43 @@ public class AveeEditorApp extends Application implements SceneHost {
             "1080x1920 (Vertical)",
             "854x480 (SD)"
     };
+    private static final String[] RESOLUTION_LABELS_COMPACT = {
+            "720p",
+            "1080p",
+            "1080x1920",
+            "480p"
+    };
+
+    public static class PreviewBottomLayout {
+        public final boolean twoRows;
+        public final boolean compactResLabels;
+        public final float resComboW;
+        public final float totalBarHeight;
+
+        PreviewBottomLayout(boolean twoRows, boolean compactResLabels, float resComboW, float totalBarHeight) {
+            this.twoRows = twoRows;
+            this.compactResLabels = compactResLabels;
+            this.resComboW = resComboW;
+            this.totalBarHeight = totalBarHeight;
+        }
+    }
+
+    public static PreviewBottomLayout computePreviewBottomBarLayout(float availW) {
+        if (availW >= 340.0f) {
+            float comboW = Math.max(110.0f, Math.min(185.0f, availW - 208.0f));
+            return new PreviewBottomLayout(false, false, comboW, 30.0f);
+        }
+        if (availW >= 265.0f) {
+            float comboW = Math.max(76.0f, availW - 196.0f);
+            return new PreviewBottomLayout(false, true, comboW, 30.0f);
+        }
+        float comboW = Math.max(72.0f, availW - 4.0f);
+        return new PreviewBottomLayout(true, true, comboW, 58.0f);
+    }
+
+    public static boolean shouldRenderLivePreview(boolean isVisualizerPage, boolean isExporting, boolean hasPendingScreenshot) {
+        return hasPendingScreenshot || (isVisualizerPage && !isExporting);
+    }
 
     private DesktopAudioEngine audioEngine;
     private RendererCore rendererCore;
@@ -91,7 +128,8 @@ public class AveeEditorApp extends Application implements SceneHost {
 
     private enum AppPage {
         VISUALIZER,
-        LIBRARY
+        LIBRARY,
+        EXPORT
     }
 
     private AppPage activePage = AppPage.VISUALIZER;
@@ -351,16 +389,24 @@ public class AveeEditorApp extends Application implements SceneHost {
         mcpBridge.drainUiTasks();
         audioEngine.tickFrame(dtSec);
 
-        // Render Avee scene into our offscreen preview FBO
-        ensurePreviewFbo(previewW, previewH);
-        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, previewFbo);
-        GLES20.setRedirectFramebuffer0(previewFbo);
-        rendererCore.onDrawFrame(null);
-        GLES20.setRedirectFramebuffer0(0);
-        GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
-        audioEngine.setLatestStats(rendererCore.getFrameStats());
-
-        updateTemplatePreviewsIncremental(nowNs);
+        // Render Avee scene into offscreen preview FBO only when visible and not exporting
+        boolean renderPreview = shouldRenderLivePreview(
+                activePage == AppPage.VISUALIZER,
+                exportDialog.isExporting(),
+                pendingWindowScreenshot != null);
+        if (renderPreview) {
+            ensurePreviewFbo(previewW, previewH);
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, previewFbo);
+            GLES20.setRedirectFramebuffer0(previewFbo);
+            rendererCore.onDrawFrame(null);
+            GLES20.setRedirectFramebuffer0(0);
+            GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0);
+            audioEngine.setLatestStats(rendererCore.getFrameStats());
+            updateTemplatePreviewsIncremental(nowNs);
+        } else if (activePage == AppPage.EXPORT || exportDialog.isExporting()) {
+            deletePreviewFbo();
+            deleteThumbFbo();
+        }
 
         renderEditorUi();
         frameCounter++;
@@ -612,6 +658,19 @@ public class AveeEditorApp extends Application implements SceneHost {
             });
             ImGui.end();
             ImGui.popStyleVar(3);
+        } else if (activePage == AppPage.EXPORT) {
+            ImGui.setNextWindowPos(contentX, contentY, imgui.flag.ImGuiCond.Always);
+            ImGui.setNextWindowSize(contentW, contentH, imgui.flag.ImGuiCond.Always);
+            int expFlags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+                    | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoSavedSettings;
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowPadding, 14f, 12f);
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+            ImGui.pushStyleVar(ImGuiStyleVar.WindowRounding, 0f);
+            ImGui.begin("##ExportPageHost", expFlags);
+            exportDialog.renderEmbeddedPage(currentScene, rendererCore, audioEngine, previewW, previewH,
+                    () -> activePage = AppPage.VISUALIZER);
+            ImGui.end();
+            ImGui.popStyleVar(3);
         } else {
             ImGui.setNextWindowPos(contentX, contentY, imgui.flag.ImGuiCond.Always);
             ImGui.setNextWindowSize(contentW, contentH, imgui.flag.ImGuiCond.Always);
@@ -678,10 +737,9 @@ public class AveeEditorApp extends Application implements SceneHost {
             }
         }
 
-        // 3. Persistent Bottom Playback Bar (always visible across Library and Visualizer)
+        // 3. Persistent Bottom Playback Bar (always visible across Library, Visualizer, and Export)
         renderBottomPlaybackBar(vpX, vpY + totalH - bottomBarH, totalW, bottomBarH);
 
-        exportDialog.render(currentScene, rendererCore, audioEngine, previewW, previewH);
         renderTemplatePickerModal();
         renderAboutDialog();
         renderUpdateDialog();
@@ -689,6 +747,21 @@ public class AveeEditorApp extends Application implements SceneHost {
             applySceneChanges(true);
             statusMessage = "Picked color from screen";
         });
+    }
+
+    private void openExportPage() {
+        exportDialog.prepareForPage(audioEngine);
+        activePage = AppPage.EXPORT;
+    }
+
+    private String getActiveTemplateDisplayName() {
+        if (templateLibrary != null && activeTemplateId != null) {
+            TemplateLibraryStore.TemplateEntry entry = templateLibrary.getEntry(activeTemplateId);
+            if (entry != null && entry.title != null && !entry.title.trim().isEmpty()) {
+                return entry.title.trim();
+            }
+        }
+        return activePresetIdx >= 0 ? ("Visualizer Preset " + activePresetIdx) : "Custom Scene";
     }
 
     private void renderNavigationSidebar(float x, float y, float w, float h) {
@@ -707,28 +780,33 @@ public class AveeEditorApp extends Application implements SceneHost {
         dl.addLine(x + 12f, y + 40f, x + w - 12f, y + 40f, ImGui.getColorU32(0.20f, 0.24f, 0.32f, 0.7f), 1.0f);
 
         if (renderSidebarNavItem(dl, "Library", "##NavLibrary", x, y + 50f, w, 42f,
-                activePage == AppPage.LIBRARY, true)) {
+                activePage == AppPage.LIBRARY, 0)) {
             activePage = AppPage.LIBRARY;
         }
         if (renderSidebarNavItem(dl, "Visualizer", "##NavVisualizer", x, y + 96f, w, 42f,
-                activePage == AppPage.VISUALIZER, false)) {
+                activePage == AppPage.VISUALIZER, 1)) {
             activePage = AppPage.VISUALIZER;
         }
+        String exportLabel = exportDialog.isExporting()
+                ? ("Export " + Math.round(exportDialog.getProgressFraction() * 100.0f) + "%")
+                : "Export";
+        if (renderSidebarNavItem(dl, exportLabel, "##NavExport", x, y + 142f, w, 42f,
+                activePage == AppPage.EXPORT, 2)) {
+            openExportPage();
+        }
 
-        // Bottom sidebar summary + Templates button
-        float footerY = y + h - 84f;
+        // Bottom sidebar summary (template chooser button moved to Preview top bar)
+        float footerY = y + h - 54f;
         dl.addLine(x + 12f, footerY - 8f, x + w - 12f, footerY - 8f, ImGui.getColorU32(0.20f, 0.24f, 0.32f, 0.7f), 1.0f);
         int trackCnt = mediaLibrary != null ? mediaLibrary.getTracks().size() : 0;
         dl.addText(x + 14f, footerY, ImGui.getColorU32(0.54f, 0.59f, 0.67f, 1.0f), trackCnt + " audio tracks");
 
-        ImGui.setCursorScreenPos(x + 12f, footerY + 24f);
-        if (ImGui.button("Templates...", w - 24f, 26f)) {
-            templatePicker.open();
-        }
-        ImGui.setCursorScreenPos(x + 12f, footerY + 54f);
+        ImGui.setCursorScreenPos(x + 14f, footerY + 22f);
+        dl.pushClipRect(x + 10f, footerY + 18f, x + w - 10f, y + h - 4f, true);
         ImGui.pushStyleColor(ImGuiCol.Text, 0.52f, 0.57f, 0.65f, 1.0f);
-        ImGui.textUnformatted(activePresetIdx >= 0 ? ("Preset " + activePresetIdx) : "Custom Scene");
+        ImGui.textUnformatted(getActiveTemplateDisplayName());
         ImGui.popStyleColor();
+        dl.popClipRect();
 
         ImGui.end();
         ImGui.popStyleVar(2);
@@ -737,7 +815,7 @@ public class AveeEditorApp extends Application implements SceneHost {
 
     private boolean renderSidebarNavItem(ImDrawList dl, String label, String uid,
                                          float x, float y, float w, float h,
-                                         boolean active, boolean isLibraryIcon) {
+                                         boolean active, int iconKind) {
         ImGui.setCursorScreenPos(x, y);
         boolean clicked = ImGui.invisibleButton(uid, w, h);
         boolean hovered = ImGui.isItemHovered();
@@ -751,13 +829,19 @@ public class AveeEditorApp extends Application implements SceneHost {
         int textCol = active ? ImGui.getColorU32(0.96f, 0.98f, 1.0f, 1.0f) : ImGui.getColorU32(0.76f, 0.80f, 0.86f, 1.0f);
         float icx = x + 24f;
         float icy = y + h * 0.5f;
-        if (isLibraryIcon) {
+        if (iconKind == 0) {
             dl.addRectFilled(icx - 7f, icy - 6f, icx - 1f, icy - 3f, iconCol, 1.5f);
             dl.addRectFilled(icx - 7f, icy - 4f, icx + 7f, icy + 6f, iconCol, 1.5f);
-        } else {
+        } else if (iconKind == 1) {
             dl.addRectFilled(icx - 7f, icy - 1f, icx - 4f, icy + 6f, iconCol, 1f);
             dl.addRectFilled(icx - 1.5f, icy - 7f, icx + 1.5f, icy + 6f, iconCol, 1f);
             dl.addRectFilled(icx + 4f, icy - 4f, icx + 7f, icy + 6f, iconCol, 1f);
+        } else {
+            dl.addLine(icx, icy + 2f, icx, icy - 6f, iconCol, 2.0f);
+            dl.addTriangleFilled(icx - 4f, icy - 3f, icx + 4f, icy - 3f, icx, icy - 8f, iconCol);
+            dl.addLine(icx - 7f, icy + 3f, icx - 7f, icy + 6.5f, iconCol, 1.8f);
+            dl.addLine(icx - 7f, icy + 6.5f, icx + 7f, icy + 6.5f, iconCol, 1.8f);
+            dl.addLine(icx + 7f, icy + 3f, icx + 7f, icy + 6.5f, iconCol, 1.8f);
         }
         dl.addText(x + 42f, y + (h - ImGui.getFontSize()) * 0.5f, textCol, label);
         return clicked;
@@ -781,42 +865,17 @@ public class AveeEditorApp extends Application implements SceneHost {
         int colIcon = ImGui.getColorU32(0.92f, 0.94f, 0.98f, 1.0f);
         int colMutedIcon = ImGui.getColorU32(0.95f, 0.42f, 0.42f, 1.0f);
 
-        // Left: Speaker Mute button + Volume slider
-        ImGui.setCursorScreenPos(x + 10f, cy - 16f);
-        if (ImGui.invisibleButton("##BarMuteBtn", 30f, 32f)) {
-            audioEngine.setMuted(!audioEngine.isMuted());
-        }
-        if (ImGui.isItemHovered()) {
-            ImGui.setTooltip(audioEngine.isMuted() ? "Unmute" : "Mute");
-        }
-        float spkX = ImGui.getItemRectMinX() + 14f;
-        float spkY = ImGui.getItemRectMinY() + 16f;
-        int spkCol = audioEngine.isMuted() ? colMutedIcon : colIcon;
-        dl.addRectFilled(spkX - 7f, spkY - 3f, spkX - 2f, spkY + 3f, spkCol);
-        dl.addTriangleFilled(spkX - 3f, spkY - 3f, spkX + 4f, spkY - 7f, spkX + 4f, spkY + 7f, spkCol);
-        if (audioEngine.isMuted()) {
-            dl.addLine(spkX + 6f, spkY - 4f, spkX + 12f, spkY + 4f, spkCol, 2.0f);
-            dl.addLine(spkX + 12f, spkY - 4f, spkX + 6f, spkY + 4f, spkCol, 2.0f);
-        }
-
-        ImGui.setCursorScreenPos(x + 44f, cy - 11f);
-        volumeTmp[0] = audioEngine.getVolume() * 100.0f;
-        ImGui.setNextItemWidth(84f);
-        if (ImGui.sliderFloat("##BarVolume", volumeTmp, 0f, 100f, "%.0f%%")) {
-            audioEngine.setVolume(volumeTmp[0] / 100.0f);
-        }
-
-        // Right: Prev | Play/Pause | Next | ... transport cluster
-        float rightGroupW = 176f;
-        float rightX = x + w - rightGroupW - 10f;
-        if (renderTransportVectorBtn(dl, "##BarPrev", rightX, cy - 17f, 36f, 34f, "Previous Track",
+        // Left: Prev | Play/Pause | Next | ... transport cluster
+        float leftX = x + 10f;
+        float leftGroupW = 168f;
+        if (renderTransportVectorBtn(dl, "##BarPrev", leftX, cy - 17f, 36f, 34f, "Previous Track",
                 (bx, by) -> {
                     dl.addRectFilled(bx - 7f, by - 6f, bx - 5f, by + 6f, colIcon);
                     dl.addTriangleFilled(bx - 4f, by, bx + 6f, by - 6f, bx + 6f, by + 6f, colIcon);
                 })) {
             playPrevInQueue();
         }
-        if (renderTransportVectorBtn(dl, "##BarPlayPause", rightX + 42f, cy - 17f, 38f, 34f,
+        if (renderTransportVectorBtn(dl, "##BarPlayPause", leftX + 42f, cy - 17f, 38f, 34f,
                 audioEngine.isAudioPlaying() ? "Pause" : "Play",
                 (bx, by) -> {
                     if (audioEngine.isAudioPlaying()) {
@@ -834,14 +893,14 @@ public class AveeEditorApp extends Application implements SceneHost {
                 pickAndLoadAudio();
             }
         }
-        if (renderTransportVectorBtn(dl, "##BarNext", rightX + 86f, cy - 17f, 36f, 34f, "Next Track",
+        if (renderTransportVectorBtn(dl, "##BarNext", leftX + 86f, cy - 17f, 36f, 34f, "Next Track",
                 (bx, by) -> {
                     dl.addTriangleFilled(bx - 6f, by - 6f, bx - 6f, by + 6f, bx + 4f, by, colIcon);
                     dl.addRectFilled(bx + 5f, by - 6f, bx + 7f, by + 6f, colIcon);
                 })) {
             playNextInQueue();
         }
-        if (renderTransportVectorBtn(dl, "##BarMore", rightX + 128f, cy - 17f, 36f, 34f, "Playback Options",
+        if (renderTransportVectorBtn(dl, "##BarMore", leftX + 128f, cy - 17f, 36f, 34f, "Playback Options",
                 (bx, by) -> {
                     dl.addCircleFilled(bx - 6f, by, 2.0f, colIcon, 8);
                     dl.addCircleFilled(bx, by, 2.0f, colIcon, 8);
@@ -866,8 +925,35 @@ public class AveeEditorApp extends Application implements SceneHost {
             ImGui.endPopup();
         }
 
+        // Right: Speaker Mute button + Volume slider
+        float volGroupW = 122f;
+        float rightX = x + w - volGroupW - 12f;
+        ImGui.setCursorScreenPos(rightX, cy - 16f);
+        if (ImGui.invisibleButton("##BarMuteBtn", 30f, 32f)) {
+            audioEngine.setMuted(!audioEngine.isMuted());
+        }
+        if (ImGui.isItemHovered()) {
+            ImGui.setTooltip(audioEngine.isMuted() ? "Unmute" : "Mute");
+        }
+        float spkX = ImGui.getItemRectMinX() + 14f;
+        float spkY = ImGui.getItemRectMinY() + 16f;
+        int spkCol = audioEngine.isMuted() ? colMutedIcon : colIcon;
+        dl.addRectFilled(spkX - 7f, spkY - 3f, spkX - 2f, spkY + 3f, spkCol);
+        dl.addTriangleFilled(spkX - 3f, spkY - 3f, spkX + 4f, spkY - 7f, spkX + 4f, spkY + 7f, spkCol);
+        if (audioEngine.isMuted()) {
+            dl.addLine(spkX + 6f, spkY - 4f, spkX + 12f, spkY + 4f, spkCol, 2.0f);
+            dl.addLine(spkX + 12f, spkY - 4f, spkX + 6f, spkY + 4f, spkCol, 2.0f);
+        }
+
+        ImGui.setCursorScreenPos(rightX + 34f, cy - 11f);
+        volumeTmp[0] = audioEngine.getVolume() * 100.0f;
+        ImGui.setNextItemWidth(84f);
+        if (ImGui.sliderFloat("##BarVolume", volumeTmp, 0f, 100f, "%.0f%%")) {
+            audioEngine.setVolume(volumeTmp[0] / 100.0f);
+        }
+
         // Center: Progress Slider + Duration + Timestamp Jump + Track Title
-        float centerX = x + 140f;
+        float centerX = leftX + leftGroupW + 14f;
         float centerRight = rightX - 16f;
         float centerW = Math.max(180f, centerRight - centerX);
         long durMs = audioEngine.getDurationMs();
@@ -925,9 +1011,11 @@ public class AveeEditorApp extends Application implements SceneHost {
             }
         }
 
-        // Row 2 under slider: track title + queue info
+        // Row 2 under slider: track title + loading / queue info
         float row2Y = y + 38f;
-        String title = audioEngine.hasAudioLoaded() ? audioEngine.getTitle() : "unknown";
+        String title = audioEngine.isLoading()
+                ? ("Loading " + audioEngine.getTitle() + "...")
+                : (audioEngine.hasAudioLoaded() ? audioEngine.getTitle() : "unknown");
         String queueNote = (!playbackQueue.isEmpty() && playbackQueueIndex >= 0)
                 ? (title + "   •   " + (playbackQueueIndex + 1) + "/" + playbackQueue.size())
                 : title;
@@ -1116,12 +1204,15 @@ public class AveeEditorApp extends Application implements SceneHost {
         if (idx < 0 || idx >= playbackQueue.size()) return;
         File f = playbackQueue.get(idx);
         playbackQueueIndex = idx;
-        if (audioEngine.loadAudioFile(f)) {
-            lastObservedCompletedCount = audioEngine.getCompletedCount();
-            statusMessage = "Playing: " + audioEngine.getTitle();
-        } else {
-            statusMessage = "Failed to load: " + f.getName();
-        }
+        statusMessage = "Loading " + f.getName() + "...";
+        audioEngine.loadAudioFileAsync(f, ok -> {
+            if (Boolean.TRUE.equals(ok)) {
+                lastObservedCompletedCount = audioEngine.getCompletedCount();
+                statusMessage = "Playing: " + audioEngine.getTitle();
+            } else {
+                statusMessage = "Failed to load: " + f.getName();
+            }
+        });
     }
 
     private void renderTemplatePickerModal() {
@@ -1234,7 +1325,7 @@ public class AveeEditorApp extends Application implements SceneHost {
                 }
                 ImGui.separator();
                 if (ImGui.menuItem("Export Video...")) {
-                    exportDialog.openDialog(audioEngine);
+                    openExportPage();
                 }
                 if (ImGui.menuItem("Export Current Frame PNG...")) {
                     File f = saveDialog("Save Preview Frame", "preview.png", new String[]{"*.png"}, "PNG Image (*.png)");
@@ -1264,6 +1355,9 @@ public class AveeEditorApp extends Application implements SceneHost {
                 if (ImGui.menuItem("Visualizer Page", null, activePage == AppPage.VISUALIZER)) {
                     activePage = AppPage.VISUALIZER;
                 }
+                if (ImGui.menuItem("Export Page", null, activePage == AppPage.EXPORT)) {
+                    openExportPage();
+                }
                 ImGui.separator();
                 ImGui.menuItem("Scene Hierarchy", null, showSceneHierarchy);
                 ImGui.menuItem("Property Inspector", null, showPropertyInspector);
@@ -1287,7 +1381,7 @@ public class AveeEditorApp extends Application implements SceneHost {
 
             if (ImGui.beginMenu("Export")) {
                 if (ImGui.menuItem("Export Video (GPU Accelerated)...")) {
-                    exportDialog.openDialog(audioEngine);
+                    openExportPage();
                 }
                 if (ImGui.menuItem("Export Current Frame PNG...")) {
                     File f = saveDialog("Save Preview Frame", "preview.png", new String[]{"*.png"}, "PNG Image (*.png)");
@@ -1575,52 +1669,33 @@ public class AveeEditorApp extends Application implements SceneHost {
     }
 
     private void renderPreviewViewportPanel() {
-        // Top preview controls bar
-        ImGui.setNextItemWidth(165f);
-        if (ImGui.combo("##res", resCombo, RESOLUTION_LABELS)) {
-            int[] res = RESOLUTIONS[resCombo.get()];
-            previewW = res[0];
-            previewH = res[1];
-        }
-        ImGui.sameLine();
-        hqBlurChk.set(audioEngine.isHighQualityBlur());
-        if (ImGui.checkbox("HQ Blur", hqBlurChk)) {
-            audioEngine.setHighQualityBlur(hqBlurChk.get());
-        }
-        ImGui.sameLine();
-        if (ImGui.smallButton("-##zoomOut")) {
-            previewZoom = clampPreviewZoom(previewZoom / 1.25f);
-            if (previewZoom <= 1.0f) {
-                previewPanX = 0.0f;
-                previewPanY = 0.0f;
-            }
-        }
-        ImGui.sameLine();
-        if (ImGui.smallButton(Math.round(previewZoom * 100.0f) + "%##zoomReset")) {
-            previewZoom = 1.0f;
-            previewPanX = 0.0f;
-            previewPanY = 0.0f;
-        }
-        if (ImGui.isItemHovered()) {
-            ImGui.setTooltip("Mouse wheel over preview to zoom, drag inside canvas to pan, double-click/click % to reset");
-        }
-        ImGui.sameLine();
-        if (ImGui.smallButton("+##zoomIn")) {
-            previewZoom = clampPreviewZoom(previewZoom * 1.25f);
-        }
-        ImGui.sameLine();
-        ImGui.textDisabled("FPS:" + rendererCore.getFrameStats().fps);
-        ImGui.sameLine();
+        // Top preview bar: [Templates...] [Loaded Template Name]              [FPS: N]
+        String fpsText = "FPS: " + rendererCore.getFrameStats().fps;
+        float fpsW = ImGui.calcTextSize(fpsText).x;
+        float winMaxX = ImGui.getWindowPosX() + ImGui.getWindowContentRegionMaxX();
+        float fpsScreenX = Math.max(ImGui.getCursorScreenPosX() + 140f, winMaxX - fpsW - 4f);
+
         if (ImGui.button("Templates...")) {
             templatePicker.open();
         }
-        ImGui.sameLine();
-        if (ImGui.button("Export Video...")) {
-            exportDialog.openDialog(audioEngine);
-        }
+        ImGui.sameLine(0.0f, 10.0f);
+        float nameStartX = ImGui.getCursorScreenPosX();
+        float nameY = ImGui.getCursorScreenPosY();
+        float nameH = ImGui.getFrameHeight();
+        String tplName = getActiveTemplateDisplayName();
+        ImDrawList topDl = ImGui.getWindowDrawList();
+        topDl.pushClipRect(nameStartX, nameY, Math.max(nameStartX + 20f, fpsScreenX - 10f), nameY + nameH, true);
+        ImGui.alignTextToFramePadding();
+        ImGui.textUnformatted(tplName);
+        topDl.popClipRect();
+
+        ImGui.sameLine(Math.max(120f, ImGui.getWindowContentRegionMaxX() - fpsW - 4f));
+        ImGui.alignTextToFramePadding();
+        ImGui.textDisabled(fpsText);
 
         float availW = Math.max(64f, ImGui.getContentRegionAvailX());
-        float availH = Math.max(64f, ImGui.getContentRegionAvailY());
+        PreviewBottomLayout bl = computePreviewBottomBarLayout(availW);
+        float availH = Math.max(64f, ImGui.getContentRegionAvailY() - bl.totalBarHeight - 6.0f);
 
         ImGui.pushStyleVar(ImGuiStyleVar.WindowPadding, 0f, 0f);
         ImGui.beginChild("##PreviewViewportCanvas", availW, availH, true,
@@ -1630,49 +1705,105 @@ public class AveeEditorApp extends Application implements SceneHost {
         float cW = Math.max(64f, ImGui.getContentRegionAvailX());
         float cH = Math.max(64f, ImGui.getContentRegionAvailY());
 
-        // Exclusive hit item prevents parent window from dragging when panning inside preview
-        ImGui.invisibleButton("##PreviewCanvasHit", cW, cH);
-        float[] fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
-        float drawW = fitRect[2];
-        float drawH = fitRect[3];
+        if (exportDialog.isExporting() || previewTex == 0) {
+            ImDrawList dl = ImGui.getWindowDrawList();
+            dl.addRectFilled(canvasX0, canvasY0, canvasX0 + cW, canvasY0 + cH, ImGui.getColorU32(0.05f, 0.06f, 0.08f, 1.0f));
+            String msg = "Preview unloaded during export for maximum performance";
+            float mw = ImGui.calcTextSize(msg).x;
+            dl.addText(canvasX0 + Math.max(12f, (cW - mw) * 0.5f), canvasY0 + cH * 0.44f,
+                    ImGui.getColorU32(0.70f, 0.76f, 0.84f, 1.0f), msg);
+            float openBtnW = 148f;
+            ImGui.setCursorScreenPos(canvasX0 + Math.max(12f, (cW - openBtnW) * 0.5f), canvasY0 + cH * 0.44f + 28f);
+            if (ImGui.button("Open Export Page", openBtnW, 28f)) {
+                openExportPage();
+            }
+        } else {
+            // Exclusive hit item prevents parent window from dragging when panning inside preview
+            ImGui.invisibleButton("##PreviewCanvasHit", cW, cH);
+            float[] fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
+            float drawW = fitRect[2];
+            float drawH = fitRect[3];
 
-        if (!inspector.getColorPicker().isActive()) {
-            if (ImGui.isItemHovered()) {
-                float wheel = ImGui.getIO().getMouseWheel();
-                if (Math.abs(wheel) > 0.01f) {
-                    float factor = wheel > 0.0f ? 1.15f : (1.0f / 1.15f);
-                    previewZoom = clampPreviewZoom(previewZoom * factor);
-                    fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
-                    drawW = fitRect[2];
-                    drawH = fitRect[3];
-                    previewPanX = clampPreviewPan(previewPanX, cW, drawW);
-                    previewPanY = clampPreviewPan(previewPanY, cH, drawH);
+            if (!inspector.getColorPicker().isActive()) {
+                if (ImGui.isItemHovered()) {
+                    float wheel = ImGui.getIO().getMouseWheel();
+                    if (Math.abs(wheel) > 0.01f) {
+                        float factor = wheel > 0.0f ? 1.15f : (1.0f / 1.15f);
+                        previewZoom = clampPreviewZoom(previewZoom * factor);
+                        fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
+                        drawW = fitRect[2];
+                        drawH = fitRect[3];
+                        previewPanX = clampPreviewPan(previewPanX, cW, drawW);
+                        previewPanY = clampPreviewPan(previewPanY, cH, drawH);
+                    }
+                    if (ImGui.isMouseDoubleClicked(0)) {
+                        previewZoom = 1.0f;
+                        previewPanX = 0.0f;
+                        previewPanY = 0.0f;
+                    }
                 }
-                if (ImGui.isMouseDoubleClicked(0)) {
-                    previewZoom = 1.0f;
-                    previewPanX = 0.0f;
-                    previewPanY = 0.0f;
+                if ((ImGui.isItemActive() && ImGui.isMouseDragging(0, 1.0f))
+                        || (ImGui.isItemHovered() && ImGui.isMouseDragging(2, 1.0f))) {
+                    previewPanX = clampPreviewPan(previewPanX + ImGui.getIO().getMouseDeltaX(), cW, drawW);
+                    previewPanY = clampPreviewPan(previewPanY + ImGui.getIO().getMouseDeltaY(), cH, drawH);
                 }
             }
-            if ((ImGui.isItemActive() && ImGui.isMouseDragging(0, 1.0f))
-                    || (ImGui.isItemHovered() && ImGui.isMouseDragging(2, 1.0f))) {
-                previewPanX = clampPreviewPan(previewPanX + ImGui.getIO().getMouseDeltaX(), cW, drawW);
-                previewPanY = clampPreviewPan(previewPanY + ImGui.getIO().getMouseDeltaY(), cH, drawH);
-            }
+
+            fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
+            ImDrawList dl = ImGui.getWindowDrawList();
+            dl.pushClipRect(canvasX0, canvasY0, canvasX0 + cW, canvasY0 + cH, true);
+            dl.addRectFilled(canvasX0, canvasY0, canvasX0 + cW, canvasY0 + cH, ImGui.getColorU32(0.05f, 0.06f, 0.08f, 1.0f));
+            // Flip V (0 -> 1 bottom-to-top) for OpenGL FBO texture orientation in ImGui
+            dl.addImage(previewTex,
+                    canvasX0 + fitRect[0], canvasY0 + fitRect[1],
+                    canvasX0 + fitRect[0] + fitRect[2], canvasY0 + fitRect[1] + fitRect[3],
+                    0f, 1f, 1f, 0f);
+            dl.popClipRect();
         }
-
-        fitRect = computeZoomedPreviewRect(cW, cH, previewW, previewH, previewZoom, previewPanX, previewPanY);
-        ImDrawList dl = ImGui.getWindowDrawList();
-        dl.pushClipRect(canvasX0, canvasY0, canvasX0 + cW, canvasY0 + cH, true);
-        dl.addRectFilled(canvasX0, canvasY0, canvasX0 + cW, canvasY0 + cH, ImGui.getColorU32(0.05f, 0.06f, 0.08f, 1.0f));
-        // Flip V (0 -> 1 bottom-to-top) for OpenGL FBO texture orientation in ImGui
-        dl.addImage(previewTex,
-                canvasX0 + fitRect[0], canvasY0 + fitRect[1],
-                canvasX0 + fitRect[0] + fitRect[2], canvasY0 + fitRect[1] + fitRect[3],
-                0f, 1f, 1f, 0f);
-        dl.popClipRect();
         ImGui.endChild();
         ImGui.popStyleVar();
+
+        // Bottom preview controls bar: Resolution + HQ Blur + Zoom, auto-resized to preview width
+        String[] resLabels = bl.compactResLabels ? RESOLUTION_LABELS_COMPACT : RESOLUTION_LABELS;
+        ImGui.setNextItemWidth(bl.resComboW);
+        if (ImGui.combo("##res", resCombo, resLabels)) {
+            int[] res = RESOLUTIONS[resCombo.get()];
+            previewW = res[0];
+            previewH = res[1];
+        }
+        if (!bl.twoRows) {
+            ImGui.sameLine(0.0f, 8.0f);
+        }
+        hqBlurChk.set(audioEngine.isHighQualityBlur());
+        if (ImGui.checkbox("HQ Blur", hqBlurChk)) {
+            audioEngine.setHighQualityBlur(hqBlurChk.get());
+        }
+
+        String zoomLabel = Math.round(previewZoom * 100.0f) + "%##zoomReset";
+        float zoomClusterW = 22f + Math.max(40f, ImGui.calcTextSize("800%").x + 12f) + 22f + 12f;
+        float hqRightLocalX = ImGui.getItemRectMaxX() - ImGui.getWindowPosX();
+        float rightZoomX = Math.max(hqRightLocalX + 8f, ImGui.getWindowContentRegionMaxX() - zoomClusterW);
+        ImGui.sameLine(rightZoomX);
+        if (ImGui.smallButton("-##zoomOut")) {
+            previewZoom = clampPreviewZoom(previewZoom / 1.25f);
+            if (previewZoom <= 1.0f) {
+                previewPanX = 0.0f;
+                previewPanY = 0.0f;
+            }
+        }
+        ImGui.sameLine(0.0f, 4.0f);
+        if (ImGui.smallButton(zoomLabel)) {
+            previewZoom = 1.0f;
+            previewPanX = 0.0f;
+            previewPanY = 0.0f;
+        }
+        if (ImGui.isItemHovered()) {
+            ImGui.setTooltip("Mouse wheel over preview to zoom, drag inside canvas to pan, double-click/click % to reset");
+        }
+        ImGui.sameLine(0.0f, 4.0f);
+        if (ImGui.smallButton("+##zoomIn")) {
+            previewZoom = clampPreviewZoom(previewZoom * 1.25f);
+        }
     }
 
     public static float clampPreviewZoom(float z) {

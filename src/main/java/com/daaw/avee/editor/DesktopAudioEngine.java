@@ -1,5 +1,7 @@
 package com.daaw.avee.editor;
 
+import com.daaw.avee.Common.Interpolate;
+import com.daaw.avee.Common.Vec2f;
 import com.daaw.avee.Common.tlog;
 import com.daaw.avee.Design.AppDesign;
 import com.daaw.avee.comp.AlbumArt.AlbumArtCore;
@@ -13,15 +15,21 @@ import com.daaw.avee.comp.Visualizer.FrameStats;
 import com.daaw.avee.comp.Visualizer.Graphic.IRenderState;
 import com.daaw.avee.comp.Visualizer.InternalVisualizationDataProvider;
 import com.daaw.avee.comp.playback.AudioFrameData;
-import com.daaw.avee.Common.Interpolate;
-import com.daaw.avee.Common.Vec2f;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.DataLine;
@@ -31,17 +39,31 @@ import mdesl.graphics.Texture;
 public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     private static final int SAMPLE_RATE = 44100;
     private static final int CHANNELS = 2;
+    public static final int RING_FRAMES = 131072; // ~2.97s stereo PCM = 512 KB constant RAM
+    private static final int STREAM_CHUNK_FRAMES = 4096;
+    private static final int LIVE_AHEAD_TARGET_FRAMES = 24576;
+    private static final int LIVE_AHEAD_LOW_FRAMES = 16384;
+    private static final Pattern DURATION_PATTERN = Pattern.compile("Duration:\\s*(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)");
 
-    private volatile short[] pcmSamples = new short[0];
+    // Fixed circular PCM buffer; never allocates per-song full-track arrays
+    private final short[] ringBuffer = new short[RING_FRAMES * CHANNELS];
+    private long ringStartFrame = 0L;
+    private long ringEndFrame = 0L;
+    private long decoderFramePos = 0L;
+    private boolean decoderEof = false;
+
     private volatile long totalFrames = 0L;
     private volatile long durationMs = 0L;
     private volatile long playheadFrame = 0L;
     private volatile boolean playing = false;
+    private volatile boolean loading = false;
     private volatile boolean muted = false;
     private volatile float volume = 1.0f;
     private volatile boolean syntheticBeat = false;
     private volatile boolean highQualityBlur = true;
     private volatile long seekRevision = 0L;
+    private volatile boolean seekRequested = false;
+    private volatile boolean flushLineRequested = false;
     private volatile long completedCount = 0L;
     private volatile String currentTitle = "No Audio Loaded";
     private volatile String currentArtist = "Avee Desktop Editor";
@@ -50,7 +72,21 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
 
     private final AudioFrameData frameData = new AudioFrameData();
     private final Object playLock = new Object();
+    private final Object decoderLock = new Object();
+    private Process decoderProc = null;
+    private InputStream decoderIn = null;
+    private final byte[] ioScratch = new byte[16384];
+    private final byte[] partialFrameBuf = new byte[4];
+    private int partialFrameBytes = 0;
+
+    private final boolean hasPlaybackThread;
     private Thread audioThread;
+    private final AtomicLong loadGeneration = new AtomicLong(0L);
+    private final ExecutorService loadExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "AveeAudioLoader");
+        t.setDaemon(true);
+        return t;
+    });
     private volatile boolean shutdown = false;
 
     private final Random random = new Random();
@@ -70,6 +106,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
     }
 
     public DesktopAudioEngine(boolean startPlaybackThread) {
+        this.hasPlaybackThread = startPlaybackThread;
         if (startPlaybackThread) {
             startPlaybackThread();
         }
@@ -79,65 +116,429 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
         this.latestStats = stats;
     }
 
+    public boolean isLoading() {
+        return loading;
+    }
+
+    public long getEstimatedAudioBufferBytes() {
+        return (long) ringBuffer.length * 2L;
+    }
+
+    public void unloadCurrentTrack() {
+        loadGeneration.incrementAndGet();
+        synchronized (decoderLock) {
+            closeDecoderLocked();
+        }
+        String oldArt;
+        synchronized (playLock) {
+            Arrays.fill(ringBuffer, (short) 0);
+            ringStartFrame = 0L;
+            ringEndFrame = 0L;
+            decoderFramePos = 0L;
+            decoderEof = false;
+            playheadFrame = 0L;
+            totalFrames = 0L;
+            durationMs = 0L;
+            playing = false;
+            loading = false;
+            audioFile = null;
+            oldArt = embeddedArtPath;
+            embeddedArtPath = null;
+            currentTitle = "No Audio Loaded";
+            seekRevision++;
+            seekRequested = false;
+            flushLineRequested = true;
+            AppDesign.setTrackPositionMs(0L);
+        }
+        deleteTempFile(oldArt);
+    }
+
     public boolean loadAudioFile(File file) {
-        if (file == null || !file.exists()) return false;
-        try {
-            ProcessBuilder pb = new ProcessBuilder(
-                    FfmpegLocator.ffmpeg(), "-v", "error", "-i", file.getAbsolutePath(),
-                    "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "2", "-ar", String.valueOf(SAMPLE_RATE),
-                    "pipe:1");
-            Process proc = pb.start();
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            try (InputStream is = proc.getInputStream()) {
-                byte[] buf = new byte[65536];
-                int n;
-                while ((n = is.read(buf)) > 0) {
-                    baos.write(buf, 0, n);
-                }
+        long gen = loadGeneration.incrementAndGet();
+        return loadAudioFileInternal(file, gen, true);
+    }
+
+    public void loadAudioFileAsync(File file, Consumer<Boolean> onComplete) {
+        if (file == null || !file.exists()) {
+            if (onComplete != null) onComplete.accept(Boolean.FALSE);
+            return;
+        }
+        long gen = loadGeneration.incrementAndGet();
+        // Clear old track buffers & stop prior decoder immediately without blocking UI
+        synchronized (decoderLock) {
+            closeDecoderLocked();
+        }
+        String oldArt;
+        synchronized (playLock) {
+            Arrays.fill(ringBuffer, (short) 0);
+            ringStartFrame = 0L;
+            ringEndFrame = 0L;
+            decoderFramePos = 0L;
+            decoderEof = false;
+            playheadFrame = 0L;
+            totalFrames = 0L;
+            durationMs = 0L;
+            playing = false;
+            loading = true;
+            audioFile = file;
+            oldArt = embeddedArtPath;
+            embeddedArtPath = null;
+            currentTitle = extractBaseTitle(file);
+            currentArtist = "Local Audio";
+            seekRevision++;
+            seekRequested = false;
+            flushLineRequested = true;
+            AppDesign.setTrackPositionMs(0L);
+        }
+        deleteTempFile(oldArt);
+
+        loadExecutor.submit(() -> {
+            boolean ok = false;
+            try {
+                ok = loadAudioFileInternal(file, gen, false);
+            } catch (Throwable t) {
+                tlog.w("Async audio load failed: " + t.getMessage());
+                ok = false;
             }
-            int rc = proc.waitFor();
-            byte[] raw = baos.toByteArray();
-            if (rc != 0 || raw.length < 4) {
-                tlog.w("ffmpeg decode failed for " + file.getName() + " exit=" + rc);
+            if (onComplete != null && !shutdown && gen == loadGeneration.get()) {
+                onComplete.accept(Boolean.valueOf(ok));
+            }
+        });
+    }
+
+    private boolean loadAudioFileInternal(File file, long gen, boolean syncArtBeforeReturn) {
+        if (file == null || !file.exists() || !file.isFile()) {
+            if (gen == loadGeneration.get()) loading = false;
+            return false;
+        }
+        try {
+            long probedMs = probeDurationMs(file);
+            if (gen != loadGeneration.get() || shutdown) {
                 return false;
             }
-            int sampleCount = raw.length / 2;
-            short[] shorts = new short[sampleCount];
-            ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts);
 
-            synchronized (playLock) {
-                this.pcmSamples = shorts;
-                this.totalFrames = sampleCount / CHANNELS;
-                this.durationMs = (this.totalFrames * 1000L) / SAMPLE_RATE;
-                this.playheadFrame = 0L;
-                this.audioFile = file;
-                this.embeddedArtPath = extractEmbeddedAlbumArt(file);
-                String n = file.getName();
-                int dot = n.lastIndexOf('.');
-                this.currentTitle = dot > 0 ? n.substring(0, dot) : n;
-                this.currentArtist = "Local Audio";
-                this.syntheticBeat = false;
-                this.playing = true;
-                this.seekRevision++;
-                AppDesign.setTrackPositionMs(0L);
+            synchronized (decoderLock) {
+                if (gen != loadGeneration.get() || shutdown) {
+                    return false;
+                }
+                openDecoderAtFrameLocked(file, 0L);
+                // Read a small initial prebuffer (~185ms) so audio starts instantly in ~8KB I/O
+                int prebufTarget = 8192;
+                int prebufTotal = 0;
+                while (prebufTotal < prebufTarget && gen == loadGeneration.get() && !shutdown) {
+                    int n = readDecodedFramesLocked(Math.min(STREAM_CHUNK_FRAMES, prebufTarget - prebufTotal));
+                    if (n <= 0) break;
+                    prebufTotal += n;
+                }
+                if (gen != loadGeneration.get() || shutdown) {
+                    closeDecoderLocked();
+                    return false;
+                }
+                long framesAvailable;
+                synchronized (playLock) {
+                    framesAvailable = ringEndFrame - ringStartFrame;
+                }
+                if (framesAvailable <= 0L && probedMs <= 0L) {
+                    closeDecoderLocked();
+                    synchronized (playLock) {
+                        loading = false;
+                        audioFile = null;
+                        currentTitle = "No Audio Loaded";
+                    }
+                    return false;
+                }
+
+                long estTotalFrames = probedMs > 0L ? (probedMs * SAMPLE_RATE) / 1000L : Math.max(framesAvailable, 1L);
+                long effDurMs = probedMs > 0L ? probedMs : ((estTotalFrames * 1000L) / SAMPLE_RATE);
+
+                String oldArt;
+                synchronized (playLock) {
+                    if (gen != loadGeneration.get() || shutdown) {
+                        closeDecoderLocked();
+                        return false;
+                    }
+                    this.audioFile = file;
+                    this.totalFrames = estTotalFrames;
+                    this.durationMs = effDurMs;
+                    this.playheadFrame = 0L;
+                    oldArt = this.embeddedArtPath;
+                    this.embeddedArtPath = null;
+                    this.currentTitle = extractBaseTitle(file);
+                    this.currentArtist = "Local Audio";
+                    this.syntheticBeat = false;
+                    this.playing = true;
+                    this.loading = false;
+                    this.seekRevision++;
+                    this.seekRequested = false;
+                    this.flushLineRequested = true;
+                    AppDesign.setTrackPositionMs(0L);
+                }
+                deleteTempFile(oldArt);
+            }
+
+            // Extract embedded cover art off the playback path so playback starts without waiting
+            if (syncArtBeforeReturn) {
+                String art = extractEmbeddedAlbumArt(file);
+                if (gen == loadGeneration.get() && !shutdown) {
+                    String prev = this.embeddedArtPath;
+                    this.embeddedArtPath = art;
+                    if (prev != null && !prev.equals(art)) deleteTempFile(prev);
+                } else {
+                    deleteTempFile(art);
+                }
+            } else {
+                String art = extractEmbeddedAlbumArt(file);
+                if (gen == loadGeneration.get() && !shutdown) {
+                    String prev = this.embeddedArtPath;
+                    this.embeddedArtPath = art;
+                    if (prev != null && !prev.equals(art)) deleteTempFile(prev);
+                } else {
+                    deleteTempFile(art);
+                }
             }
             return true;
         } catch (Throwable t) {
             tlog.w("Audio load failed: " + t.getMessage());
+            synchronized (playLock) {
+                if (gen == loadGeneration.get()) {
+                    loading = false;
+                }
+            }
             return false;
         }
     }
 
+    private static String extractBaseTitle(File file) {
+        String n = file.getName();
+        int dot = n.lastIndexOf('.');
+        return dot > 0 ? n.substring(0, dot) : n;
+    }
+
+    private static void deleteTempFile(String path) {
+        if (path != null && !path.isEmpty()) {
+            try {
+                new File(path).delete();
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    private void closeDecoderLocked() {
+        partialFrameBytes = 0;
+        if (decoderIn != null) {
+            try { decoderIn.close(); } catch (Throwable ignored) {}
+            decoderIn = null;
+        }
+        if (decoderProc != null) {
+            try { decoderProc.destroyForcibly(); } catch (Throwable ignored) {}
+            decoderProc = null;
+        }
+    }
+
+    private void openDecoderAtFrameLocked(File file, long startFrame) throws Exception {
+        closeDecoderLocked();
+        if (file == null || !file.isFile()) return;
+        long clampedStart = Math.max(0L, startFrame);
+        ProcessBuilder pb;
+        if (clampedStart > 0L) {
+            String startSec = String.format(Locale.US, "%.6f", clampedStart / (double) SAMPLE_RATE);
+            pb = new ProcessBuilder(
+                    FfmpegLocator.ffmpeg(), "-v", "error", "-ss", startSec,
+                    "-i", file.getAbsolutePath(),
+                    "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "2", "-ar", String.valueOf(SAMPLE_RATE),
+                    "pipe:1");
+        } else {
+            pb = new ProcessBuilder(
+                    FfmpegLocator.ffmpeg(), "-v", "error",
+                    "-i", file.getAbsolutePath(),
+                    "-f", "s16le", "-acodec", "pcm_s16le", "-ac", "2", "-ar", String.valueOf(SAMPLE_RATE),
+                    "pipe:1");
+        }
+        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+        decoderProc = pb.start();
+        decoderIn = decoderProc.getInputStream();
+        synchronized (playLock) {
+            Arrays.fill(ringBuffer, (short) 0);
+            ringStartFrame = clampedStart;
+            ringEndFrame = clampedStart;
+            decoderFramePos = clampedStart;
+            decoderEof = false;
+        }
+    }
+
+    /**
+     * Reads up to maxFrames stereo PCM frames from the active ffmpeg pipe and pushes into ringBuffer.
+     * Caller MUST hold decoderLock and NOT hold playLock.
+     */
+    private int readDecodedFramesLocked(int maxFrames) {
+        InputStream in = decoderIn;
+        if (in == null || maxFrames <= 0) return 0;
+
+        int capBytes = Math.min(ioScratch.length - partialFrameBytes, maxFrames * 4);
+        if (capBytes < 4) capBytes = Math.min(ioScratch.length - partialFrameBytes, 4096);
+        int nRead;
+        try {
+            if (partialFrameBytes > 0) {
+                System.arraycopy(partialFrameBuf, 0, ioScratch, 0, partialFrameBytes);
+            }
+            nRead = in.read(ioScratch, partialFrameBytes, capBytes);
+        } catch (Throwable t) {
+            nRead = -1;
+        }
+
+        if (nRead < 0) {
+            closeDecoderLocked();
+            synchronized (playLock) {
+                decoderEof = true;
+                if (decoderFramePos > 0L && (totalFrames == 0L || decoderFramePos < totalFrames)) {
+                    totalFrames = decoderFramePos;
+                    durationMs = (totalFrames * 1000L) / SAMPLE_RATE;
+                }
+            }
+            return -1;
+        }
+        if (nRead == 0) {
+            return 0;
+        }
+
+        int totalBytes = partialFrameBytes + nRead;
+        int frames = totalBytes / 4;
+        int consumedBytes = frames * 4;
+        int leftover = totalBytes - consumedBytes;
+        if (leftover > 0) {
+            System.arraycopy(ioScratch, consumedBytes, partialFrameBuf, 0, leftover);
+        }
+        partialFrameBytes = leftover;
+        if (frames <= 0) {
+            return 0;
+        }
+
+        synchronized (playLock) {
+            ByteBuffer bb = ByteBuffer.wrap(ioScratch, 0, consumedBytes).order(ByteOrder.LITTLE_ENDIAN);
+            for (int i = 0; i < frames; i++) {
+                short l = bb.getShort();
+                short r = bb.getShort();
+                int slot = (int) (decoderFramePos % RING_FRAMES);
+                ringBuffer[slot * 2] = l;
+                ringBuffer[slot * 2 + 1] = r;
+                decoderFramePos++;
+            }
+            ringEndFrame = decoderFramePos;
+            if (ringEndFrame - ringStartFrame > RING_FRAMES) {
+                ringStartFrame = ringEndFrame - RING_FRAMES;
+            }
+        }
+        return frames;
+    }
+
+    private long probeDurationMs(File file) {
+        try {
+            Process p = new ProcessBuilder(
+                    FfmpegLocator.ffprobe(), "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    file.getAbsolutePath())
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            String out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            int rc = p.waitFor();
+            if (rc == 0 && !out.isEmpty() && !"N/A".equalsIgnoreCase(out)) {
+                double sec = Double.parseDouble(out.split("\\s+")[0]);
+                if (!Double.isNaN(sec) && !Double.isInfinite(sec) && sec > 0.0) {
+                    return Math.round(sec * 1000.0);
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // Fallback to parsing ffmpeg -i stderr Duration: HH:MM:SS.xx
+        try {
+            Process p = new ProcessBuilder(FfmpegLocator.ffmpeg(), "-i", file.getAbsolutePath())
+                    .redirectErrorStream(true)
+                    .start();
+            byte[] bytes = p.getInputStream().readAllBytes();
+            p.waitFor();
+            String text = new String(bytes, StandardCharsets.UTF_8);
+            Matcher m = DURATION_PATTERN.matcher(text);
+            if (m.find()) {
+                long h = Long.parseLong(m.group(1));
+                long min = Long.parseLong(m.group(2));
+                double s = Double.parseDouble(m.group(3));
+                double totalSec = h * 3600.0 + min * 60.0 + s;
+                if (totalSec > 0.0) {
+                    return Math.round(totalSec * 1000.0);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return 0L;
+    }
+
+    private void ensureOfflineWindowBuffered(long centerFrame, int halfWindowFrames) {
+        File curFile;
+        long totFrames;
+        long rStart;
+        long rEnd;
+        boolean eof;
+        synchronized (playLock) {
+            curFile = this.audioFile;
+            totFrames = this.totalFrames;
+            rStart = this.ringStartFrame;
+            rEnd = this.ringEndFrame;
+            eof = this.decoderEof;
+        }
+        if (curFile == null || totFrames <= 0L) return;
+
+        long needStart = Math.max(0L, centerFrame - halfWindowFrames);
+        long needEnd = Math.min(totFrames, centerFrame + halfWindowFrames);
+        if (needEnd <= needStart) needEnd = Math.min(totFrames, needStart + 1L);
+
+        if (needStart >= rStart && (needEnd <= rEnd || eof)) {
+            return;
+        }
+
+        synchronized (decoderLock) {
+            synchronized (playLock) {
+                curFile = this.audioFile;
+                totFrames = this.totalFrames;
+                rStart = this.ringStartFrame;
+                rEnd = this.ringEndFrame;
+                eof = this.decoderEof;
+            }
+            if (curFile == null) return;
+            needEnd = Math.min(Math.max(totFrames, centerFrame + halfWindowFrames), centerFrame + halfWindowFrames);
+            if (needStart >= rStart && (needEnd <= rEnd || eof)) {
+                return;
+            }
+
+            boolean canAdvance = (decoderIn != null) && !eof
+                    && needStart >= rStart
+                    && (needEnd - rEnd) <= (long) SAMPLE_RATE * 6L;
+            if (!canAdvance) {
+                try {
+                    openDecoderAtFrameLocked(curFile, needStart);
+                } catch (Throwable t) {
+                    tlog.w("Offline decoder seek failed: " + t.getMessage());
+                    return;
+                }
+            }
+            while (!shutdown) {
+                synchronized (playLock) {
+                    if (this.ringEndFrame >= needEnd || this.decoderEof) break;
+                }
+                int n = readDecodedFramesLocked(STREAM_CHUNK_FRAMES);
+                if (n < 0) break;
+            }
+        }
+    }
+
     private void startPlaybackThread() {
+        final byte[] chunk = new byte[1024 * CHANNELS * 2];
         audioThread = new Thread(() -> {
             SourceDataLine line = null;
-            byte[] chunk = new byte[2048 * CHANNELS * 2];
             try {
                 AudioFormat fmt = new AudioFormat(SAMPLE_RATE, 16, CHANNELS, true, false);
                 DataLine.Info info = new DataLine.Info(SourceDataLine.class, fmt);
                 if (AudioSystem.isLineSupported(info)) {
                     line = (SourceDataLine) AudioSystem.getLine(info);
-                    line.open(fmt, chunk.length * 4);
+                    line.open(fmt, 16384);
                     line.start();
                 }
             } catch (Throwable t) {
@@ -151,47 +552,136 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                 double dtSec = Math.min(0.1, (nowNs - lastTickNs) / 1_000_000_000.0);
                 lastTickNs = nowNs;
 
-                short[] samples;
+                if (flushLineRequested) {
+                    flushLineRequested = false;
+                    if (line != null) line.flush();
+                }
+
+                // Handle seek / loop-restart asynchronously off the UI thread
+                if (seekRequested) {
+                    File targetFile;
+                    long targetFrame;
+                    long targetSeekRev;
+                    synchronized (playLock) {
+                        targetFile = this.audioFile;
+                        targetFrame = this.playheadFrame;
+                        targetSeekRev = this.seekRevision;
+                        seekRequested = false;
+                    }
+                    if (targetFile != null) {
+                        boolean needReopen;
+                        synchronized (playLock) {
+                            needReopen = targetFrame < this.ringStartFrame || targetFrame >= this.ringEndFrame;
+                        }
+                        if (needReopen) {
+                            synchronized (decoderLock) {
+                                long origin = Math.max(0L, targetFrame - 4096L);
+                                try {
+                                    openDecoderAtFrameLocked(targetFile, origin);
+                                    long fillTarget = targetFrame + 8192L;
+                                    while (!shutdown && this.seekRevision == targetSeekRev) {
+                                        synchronized (playLock) {
+                                            if (this.ringEndFrame >= fillTarget || this.decoderEof) break;
+                                        }
+                                        if (readDecodedFramesLocked(STREAM_CHUNK_FRAMES) < 0) break;
+                                    }
+                                } catch (Throwable t) {
+                                    tlog.w("Stream seek failed: " + t.getMessage());
+                                }
+                            }
+                        }
+                        if (line != null) line.flush();
+                    }
+                    continue;
+                }
+
+                File curFile;
                 long curFrame;
                 long totFrames;
                 long iterSeekRev;
+                long rStart;
+                long rEnd;
+                boolean eof;
                 boolean isPlay;
                 boolean isMute;
+                boolean isLoad;
                 synchronized (playLock) {
-                    samples = this.pcmSamples;
+                    curFile = this.audioFile;
                     curFrame = this.playheadFrame;
                     totFrames = this.totalFrames;
                     iterSeekRev = this.seekRevision;
+                    rStart = this.ringStartFrame;
+                    rEnd = this.ringEndFrame;
+                    eof = this.decoderEof;
                     isPlay = this.playing;
                     isMute = this.muted;
+                    isLoad = this.loading;
                 }
 
-                if (isPlay && totFrames > 0) {
-                    int framesThisStep = Math.min(1024, (int) Math.max(0, totFrames - curFrame));
-                    if (framesThisStep <= 0) {
+                // Top up streaming ring buffer ahead of playhead without blocking on lock
+                if (isPlay && !isLoad && curFile != null && !eof && (rEnd - curFrame) < LIVE_AHEAD_LOW_FRAMES) {
+                    synchronized (decoderLock) {
+                        while (!shutdown && this.seekRevision == iterSeekRev && !seekRequested) {
+                            long endNow;
+                            boolean eofNow;
+                            synchronized (playLock) {
+                                endNow = this.ringEndFrame;
+                                eofNow = this.decoderEof;
+                            }
+                            if (eofNow || (endNow - curFrame) >= LIVE_AHEAD_TARGET_FRAMES) break;
+                            if (readDecodedFramesLocked(STREAM_CHUNK_FRAMES) <= 0) break;
+                        }
+                    }
+                    continue;
+                }
+
+                if (isPlay && !isLoad && totFrames > 0) {
+                    long endBoundary = eof ? rEnd : totFrames;
+                    int framesAvailable = (int) Math.max(0L, Math.min(rEnd, endBoundary) - curFrame);
+                    if (curFrame >= endBoundary) {
                         synchronized (playLock) {
                             if (this.seekRevision == iterSeekRev) {
                                 this.completedCount++;
                                 this.playheadFrame = 0L;
+                                this.seekRevision++;
+                                this.seekRequested = true;
                                 AppDesign.setTrackPositionMs(0L);
                             }
                         }
                         continue;
                     }
+                    if (framesAvailable <= 0 && !eof) {
+                        try { Thread.sleep(4); } catch (InterruptedException ignored) {}
+                        continue;
+                    }
+
+                    int framesThisStep = Math.min(1024, Math.max(1, framesAvailable));
                     if (line != null) {
                         int bytes = framesThisStep * CHANNELS * 2;
                         float gain = isMute ? 0.0f : this.volume;
-                        for (int i = 0; i < framesThisStep * CHANNELS; i++) {
-                            int raw = samples[(int) (curFrame * CHANNELS + i)];
-                            int scaled = gain <= 0.0f ? 0 : Math.max(-32768, Math.min(32767, Math.round(raw * gain)));
-                            short s = (short) scaled;
-                            chunk[i * 2] = (byte) (s & 0xFF);
-                            chunk[i * 2 + 1] = (byte) ((s >> 8) & 0xFF);
+                        synchronized (playLock) {
+                            if (this.seekRevision != iterSeekRev) continue;
+                            for (int i = 0; i < framesThisStep; i++) {
+                                long fPos = curFrame + i;
+                                short l = 0, r = 0;
+                                if (fPos >= this.ringStartFrame && fPos < this.ringEndFrame) {
+                                    int slot = (int) (fPos % RING_FRAMES);
+                                    l = ringBuffer[slot * 2];
+                                    r = ringBuffer[slot * 2 + 1];
+                                }
+                                int sl = gain <= 0.0f ? 0 : Math.max(-32768, Math.min(32767, Math.round(l * gain)));
+                                int sr = gain <= 0.0f ? 0 : Math.max(-32768, Math.min(32767, Math.round(r * gain)));
+                                int bi = i * 4;
+                                chunk[bi] = (byte) (sl & 0xFF);
+                                chunk[bi + 1] = (byte) ((sl >> 8) & 0xFF);
+                                chunk[bi + 2] = (byte) (sr & 0xFF);
+                                chunk[bi + 3] = (byte) ((sr >> 8) & 0xFF);
+                            }
                         }
                         line.write(chunk, 0, bytes);
                     } else {
                         try { Thread.sleep(16); } catch (InterruptedException ignored) {}
-                        framesThisStep = (int) (dtSec * SAMPLE_RATE);
+                        framesThisStep = Math.min(framesAvailable, Math.max(1, (int) (dtSec * SAMPLE_RATE)));
                     }
                     synchronized (playLock) {
                         if (this.seekRevision == iterSeekRev) {
@@ -213,6 +703,8 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
 
     public void shutdown() {
         shutdown = true;
+        loadExecutor.shutdownNow();
+        unloadCurrentTrack();
         if (audioThread != null) audioThread.interrupt();
     }
 
@@ -242,25 +734,40 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
 
     public void stepOfflineFrame(long posMs, float dtSec) {
         this.playing = true;
+        long targetFrame;
         synchronized (playLock) {
             if (totalFrames > 0) {
                 long f = (posMs * SAMPLE_RATE) / 1000L;
-                this.playheadFrame = Math.max(0L, Math.min(totalFrames - 1, f));
+                targetFrame = Math.max(0L, Math.min(totalFrames - 1, f));
+                this.playheadFrame = targetFrame;
                 this.seekRevision++;
+            } else {
+                targetFrame = 0L;
             }
         }
         AppDesign.setTrackPositionMs(posMs);
+        if (!hasPlaybackThread && totalFrames > 0) {
+            ensureOfflineWindowBuffered(targetFrame, 8192);
+        }
         tickFrame(dtSec);
     }
 
     public void seekMs(long ms) {
+        long targetFrame = -1L;
         synchronized (playLock) {
             if (totalFrames > 0) {
                 long f = (ms * SAMPLE_RATE) / 1000L;
-                this.playheadFrame = Math.max(0L, Math.min(totalFrames - 1, f));
+                targetFrame = Math.max(0L, Math.min(totalFrames - 1, f));
+                this.playheadFrame = targetFrame;
                 this.seekRevision++;
+                if (hasPlaybackThread) {
+                    this.seekRequested = true;
+                }
                 AppDesign.setTrackPositionMs((this.playheadFrame * 1000L) / SAMPLE_RATE);
             }
+        }
+        if (!hasPlaybackThread && targetFrame >= 0L) {
+            ensureOfflineWindowBuffered(targetFrame, 8192);
         }
     }
 
@@ -291,27 +798,40 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
         int count = Math.max(256, outCount);
         frameData.init(SAMPLE_RATE, CHANNELS, count, count, true);
         short[] dst = frameData.pcmBuffer;
-        short[] src = this.pcmSamples;
-        long frames = this.totalFrames;
+
+        long curTotFrames = this.totalFrames;
         long offsetFrames = (offsetMs * (long) SAMPLE_RATE) / 1000L;
-        long posFrame = frames > 0 ? Math.max(0L, Math.min(frames - 1, this.playheadFrame + offsetFrames)) : 0L;
+        long posFrame = curTotFrames > 0 ? Math.max(0L, Math.min(curTotFrames - 1, this.playheadFrame + offsetFrames)) : 0L;
+
+        if (!hasPlaybackThread && curTotFrames > 0 && !syntheticBeat) {
+            ensureOfflineWindowBuffered(posFrame, count / 2 + 1024);
+        }
 
         double rmsAccum = 0.0;
         short minS = Short.MAX_VALUE;
         short maxS = 0;
 
-        if (frames > 0 && src.length >= frames * CHANNELS && !syntheticBeat) {
-            for (int i = 0; i < count; i++) {
-                long fIdx = Math.max(0, Math.min(frames - 1, posFrame - (count / 2) + i));
-                short l = src[(int) (fIdx * 2)];
-                short r = src[(int) (fIdx * 2 + 1)];
-                dst[i * 2] = l;
-                dst[i * 2 + 1] = r;
-                float mono = (l + r) * 0.5f;
-                rmsAccum += mono * mono;
-                short abs = (short) Math.min(Short.MAX_VALUE, Math.abs(l));
-                if (abs < minS) minS = abs;
-                if (abs > maxS) maxS = abs;
+        if (curTotFrames > 0 && !syntheticBeat) {
+            synchronized (playLock) {
+                long rStart = this.ringStartFrame;
+                long rEnd = this.ringEndFrame;
+                for (int i = 0; i < count; i++) {
+                    long fIdx = Math.max(0L, Math.min(curTotFrames - 1, posFrame - (count / 2) + i));
+                    short l = 0;
+                    short r = 0;
+                    if (fIdx >= rStart && fIdx < rEnd) {
+                        int slot = (int) (fIdx % RING_FRAMES);
+                        l = ringBuffer[slot * 2];
+                        r = ringBuffer[slot * 2 + 1];
+                    }
+                    dst[i * 2] = l;
+                    dst[i * 2 + 1] = r;
+                    float mono = (l + r) * 0.5f;
+                    rmsAccum += mono * mono;
+                    short abs = (short) Math.min(Short.MAX_VALUE, Math.abs(l));
+                    if (abs < minS) minS = abs;
+                    if (abs > maxS) maxS = abs;
+                }
             }
         } else if (syntheticBeat) {
             double t = totalTimeSec + (offsetMs / 1000.0);
@@ -319,8 +839,8 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
             for (int i = 0; i < count; i++) {
                 double phase = (double) i / SAMPLE_RATE + t;
                 double wave = 0.55 * Math.sin(2 * Math.PI * 62.0 * phase) * beatEnv
-                            + 0.25 * Math.sin(2 * Math.PI * 220.0 * phase + t * 3.0)
-                            + 0.15 * Math.sin(2 * Math.PI * 1400.0 * phase * (1.0 + 0.3 * Math.sin(t * 1.7)));
+                        + 0.25 * Math.sin(2 * Math.PI * 220.0 * phase + t * 3.0)
+                        + 0.15 * Math.sin(2 * Math.PI * 1400.0 * phase * (1.0 + 0.3 * Math.sin(t * 1.7)));
                 short s = (short) Math.max(-32767, Math.min(32767, wave * 18000.0));
                 dst[i * 2] = s;
                 dst[i * 2 + 1] = s;
@@ -530,8 +1050,7 @@ public class DesktopAudioEngine implements InternalVisualizationDataProvider {
                 return tmp.getAbsolutePath();
             }
             tmp.delete();
-        } catch (Throwable ignored) {
-        }
+        } catch (Throwable ignored) {}
         return null;
     }
 

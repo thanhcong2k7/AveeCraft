@@ -56,7 +56,7 @@ public class ExportDialogPanel {
     private volatile String completedPath = "";
     private volatile long exportStartNs = 0L;
 
-    public void openDialog(DesktopAudioEngine audio) {
+    public void prepareForPage(DesktopAudioEngine audio) {
         if (probeCache == null) {
             new Thread(() -> {
                 GpuBackend.ProbeResult p = GpuBackend.probe();
@@ -64,6 +64,7 @@ public class ExportDialogPanel {
                 gpuLabels = GpuBackend.getUiLabels(p);
             }, "AveeGpuProbe").start();
         }
+        if (exporting) return;
         cfg.highQualityBlur = audio != null && audio.isHighQualityBlur();
         hqBlurChk.set(cfg.highQualityBlur);
         if (audio != null && audio.hasAudioLoaded()) {
@@ -79,11 +80,49 @@ public class ExportDialogPanel {
         errorLine = "";
         completedPath = "";
         statusLine = "";
+    }
+
+    public void openDialog(DesktopAudioEngine audio) {
+        prepareForPage(audio);
         open = true;
     }
 
     public boolean isExporting() {
         return exporting;
+    }
+
+    public float getProgressFraction() {
+        return progressTotal > 0 ? Math.max(0f, Math.min(1f, (float) progressCur / progressTotal)) : 0f;
+    }
+
+    public void renderEmbeddedPage(CustomScene scene, RendererCore rendererCore, DesktopAudioEngine audio,
+                                   int currentPreviewW, int currentPreviewH, Runnable onBackToVisualizer) {
+        if (probeCache != null && gpuLabels == null) {
+            gpuLabels = GpuBackend.getUiLabels(probeCache);
+        }
+        String[] activeGpuLabels = gpuLabels != null ? gpuLabels : new String[]{
+                "Auto (Probing GPUs...)",
+                "Integrated GPU",
+                "External / Dedicated GPU",
+                "CPU Software (libx264 / libx265)"
+        };
+
+        ImGui.text("Export Visualizer Video");
+        if (!exporting && onBackToVisualizer != null) {
+            float btnW = 148f;
+            ImGui.sameLine(Math.max(200f, ImGui.getWindowContentRegionMaxX() - btnW - 8f));
+            if (ImGui.button("Back to Visualizer", btnW, 0f)) {
+                onBackToVisualizer.run();
+            }
+        }
+        ImGui.textDisabled("Live preview is unloaded during export to dedicate full GPU/CPU performance to encoding.");
+        ImGui.separator();
+
+        if (exporting) {
+            renderExportingView();
+        } else {
+            renderConfigView(scene, rendererCore, audio, activeGpuLabels, currentPreviewW, currentPreviewH, true);
+        }
     }
 
     public void render(CustomScene scene, RendererCore rendererCore, DesktopAudioEngine audio,
@@ -107,7 +146,7 @@ public class ExportDialogPanel {
             if (exporting) {
                 renderExportingView();
             } else {
-                renderConfigView(scene, rendererCore, audio, activeGpuLabels, currentPreviewW, currentPreviewH);
+                renderConfigView(scene, rendererCore, audio, activeGpuLabels, currentPreviewW, currentPreviewH, false);
             }
         }
         ImGui.end();
@@ -117,7 +156,7 @@ public class ExportDialogPanel {
     }
 
     private void renderConfigView(CustomScene scene, RendererCore rendererCore, DesktopAudioEngine audio,
-                                  String[] activeGpuLabels, int curW, int curH) {
+                                  String[] activeGpuLabels, int curW, int curH, boolean embedded) {
         if (ImGui.collapsingHeader("Output & Hardware Acceleration", imgui.flag.ImGuiTreeNodeFlags.DefaultOpen)) {
             if (ImGui.combo("GPU Engine##exp_gpu", gpuCombo, activeGpuLabels)) {
                 cfg.gpuPreference = GpuBackend.GpuPreference.values()[gpuCombo.get()];
@@ -227,9 +266,11 @@ public class ExportDialogPanel {
         if (ImGui.button("Export Video", 170f, 30f)) {
             startExportJob(false, scene, rendererCore, audio);
         }
-        ImGui.sameLine();
-        if (ImGui.button("Close", 100f, 30f)) {
-            open = false;
+        if (!embedded) {
+            ImGui.sameLine();
+            if (ImGui.button("Close", 100f, 30f)) {
+                open = false;
+            }
         }
     }
 
